@@ -43,7 +43,7 @@ This project implements an advanced trading system that combines multiple machin
   - Choppiness Index
   - Volatility-based entry/exit rules
 
-## 🛠 Prerequisites
+## 🛠 Prerequisites (Outdated)
 
 ```bash
 python 3.10+
@@ -64,7 +64,7 @@ git clone https://github.com/yourusername/Trading-ML-model.git
 cd Trading-ML-model
 ```
 
-Create and activate virtual environment:
+Create and activate virtual environment: (Tested and ran with python 3.11.9 **)
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -128,3 +128,5 @@ Contributions, issues, and feature requests are welcome. Feel free to check issu
 
 📧 Contact
 -
+
+** Numpy version was recently updated to latest which was causing not being able to use a higher python version although no higher version was tested yet
