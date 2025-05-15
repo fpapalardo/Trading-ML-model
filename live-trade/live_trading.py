@@ -4,6 +4,9 @@ import joblib
 import time
 import datetime
 import os
+from ta.volatility import (
+    AverageTrueRange
+)
 from indicator_calculation import compute_indicators
 
 BAR_FILE = "./live_data/bar_data.csv"
@@ -17,12 +20,12 @@ STATUS_FILE = "./trading/status.txt"
 # STATUS_FILE = "./trading/status.txt"
 # MODEL_FILE = "rf_model_0.005_0.1_20250101.pkl"
 
-TRADE_THRESHOLD = 0.001
+TRADE_THRESHOLD = 0.0005
 TICK_VALUE = 5
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 3.0
-TRAIL_START_MULT = 2.5
-TRAIL_STOP_MULT = 1.0
+TRAIL_START_MULT = 1.0
+TRAIL_STOP_MULT = .5
 MAX_CONTRACTS = 1
 
 # === Load model ===
@@ -41,6 +44,13 @@ def read_latest_bar():
     df = pd.read_csv(BAR_FILE, names=["datetime", "open", "high", "low", "close", "volume"])
     df['datetime'] = pd.to_datetime(df['datetime'])
     return df.tail(100)
+
+def choppiness_index(high, low, close, length=14):
+    tr = AverageTrueRange(high=high, low=low, close=close, window=length).average_true_range()
+    atr_sum = tr.rolling(length).sum()
+    high_max = high.rolling(length).max()
+    low_min = low.rolling(length).min()
+    return 100 * np.log10(atr_sum / (high_max - low_min)) / np.log10(length)
 
 def trim_bar_data(file_path: str, max_rows: int = 1000):
     try:
@@ -84,7 +94,7 @@ def act_on_model(df):
     df = compute_indicators(df)
     latest = df.iloc[-1:]
     if df.shape[0] < 50:
-        print("⏭️ Skipping: Not enough data (requires at least 100 rows).")
+        print("⏭️ Skipping: Not enough data (requires at least 50 rows).")
         return
 
     features = [
@@ -115,13 +125,31 @@ def act_on_model(df):
     elif pred_return <= -TRADE_THRESHOLD:
         side = "short"
         print(f"📉 Prediction: {pred_return:.4f} | Side: {side}")
+    elif active_trade_side == "long" and pred_return < -TRADE_THRESHOLD and choppiness_index(df['high'], df['low'], df['close']).iloc[-1] > 55:
+        print("🔁 Counter signal: LONG -> SHORT. Closing LONG early.")
+        with open(EXIT_FILE, "w") as f:
+            f.write("action: exit\n")
+            f.write("reason: counter_signal\n")
+        with open(STATUS_FILE, "w") as f:
+            f.write("flat")
+        active_trade_side = None
+        return  # Exit, let the next loop pick up the new signal
+
+    elif active_trade_side == "short" and pred_return > TRADE_THRESHOLD and choppiness_index(df['high'], df['low'], df['close']).iloc[-1] > 55:
+        print("🔁 Counter signal: SHORT -> LONG. Closing SHORT early.")
+        with open(EXIT_FILE, "w") as f:
+            f.write("action: exit\n")
+            f.write("reason: counter_signal\n")
+        with open(STATUS_FILE, "w") as f:
+            f.write("flat")
+        active_trade_side = None
+        return
     else:
         print(f"⏭️ Skipping: Prediction {pred_return:.4f} not strong enough.")
         return  # prediction not strong enough
 
     latest = df.iloc[-1]
-    
-    if check_trade_status():
+    if check_trade_status() and choppiness_index(df['high'], df['low'], df['close']).iloc[-1] < 55:
         entry_price = latest['close']
         atr = latest['atr_14']
 
@@ -144,13 +172,14 @@ def act_on_model(df):
             f.write(f"price: {entry_price:.2f}\n")
             f.write(f"take_profit: {tp_price:.2f}\n")
             f.write(f"stop_loss: {sl_price:.2f}\n")      
+            f.write(f"trail_trigger: {trail_trigger:.2f}\n")
 
         with open(STATUS_FILE, "w") as f:
             f.write(f"In Trade")  
 
         print(f"[{latest['datetime']}] 🚀 Entry: {side.upper()} @ {entry_price:.2f} | SL: {sl_price:.2f} | TP: {tp_price:.2f} | TrailTrig: {trail_trigger:.2f}")
-    
     elif not check_trade_status():
+        atr = latest['atr_14']
         if active_trade_side == 'long' and latest['high'] >= trail_trigger:
             trail_stop = latest['close'] - TRAIL_STOP_MULT * atr
         elif active_trade_side == 'short' and latest['low'] <= trail_trigger:
@@ -167,6 +196,8 @@ def act_on_model(df):
             print(f"[{latest['datetime']}] Updated | TrailStop: {trail_stop:.2f}")
         else:
             print(f"[{latest['datetime']}] No update needed | Current price: {latest['close']:.2f}")
+    else:
+        print("Choppiness index too high, not entering trade.")
 
 # === Main Loop ===
 print("🔁 Waiting for new bars...")
