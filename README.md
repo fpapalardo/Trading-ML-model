@@ -99,8 +99,8 @@ Trading-ML-model/
 ├── live-trade/          # Python handler to use for trading with the model
 ├── models/              # Saved model files
 ├── source/              # Source code of training model
-├     ├── data/         # Market data files
-├     ├── trading-ai.ipynb     # Main training notebook
+│     ├── data/         # Market data files
+│     └── trading-ai.ipynb     # Main training notebook
 └── README.md            # Project documentation
 ```
 
