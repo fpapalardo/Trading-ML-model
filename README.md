@@ -64,7 +64,7 @@ git clone https://github.com/yourusername/Trading-ML-model.git
 cd Trading-ML-model
 ```
 
-Create and activate virtual environment: (Tested and ran with python 3.11.9 **)
+Create and activate virtual environment: (Tested and ran with python 3.12.10 **)
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -100,7 +100,8 @@ Trading-ML-model/
 ├── models/              # Saved model files
 ├── source/              # Source code of training model
 │     ├── data/         # Market data files
-│     └── trading-ai.ipynb     # Main training notebook
+|     └── other/         # Market data files
+│           └── trading-ai.ipynb     # Main training notebook
 └── README.md            # Project documentation
 ```
 
