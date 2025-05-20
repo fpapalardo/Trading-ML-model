@@ -6,49 +6,40 @@ from ta.trend import MACD
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
     # === Candle range
-    df['candle_range'] = df['high'] - df['low']
+    def choppiness_index(high, low, close, length=14):
+        tr = AverageTrueRange(high=high, low=low, close=close, window=length).average_true_range()
+        atr_sum = tr.rolling(length).sum()
+        high_max = high.rolling(length).max()
+        low_min = low.rolling(length).min()
+        return 100 * np.log10(atr_sum / (high_max - low_min)) / np.log10(length)
 
-    # === RSI (6)
-    df['rsi_6'] = RSIIndicator(close=df['close'], window=6).rsi()
+    def detect_pivot_highs_lows(df, lookback, lookforward):
+        highs, lows = df['high'], df['low']
+        df[f'is_pivot_high_{lookback}'] = (
+            (highs.shift(lookback)  < highs) &
+            (highs.shift(-lookforward)< highs)
+        ).astype(int)
+        df[f'is_pivot_low_{lookback}']  = (
+            (lows.shift(lookback)   > lows) &
+            (lows.shift(-lookforward)> lows)
+        ).astype(int)
+        return df
 
-    # === ATR (5)
-    df['atr_5'] = AverageTrueRange(
-        high=df['high'], low=df['low'], close=df['close'], window=5
-    ).average_true_range()
+    # === Feature Engineering ===
+    df['atr_5']         = AverageTrueRange(df['high'], df['low'], df['close'], window=5).average_true_range()
+    df['atr_pct']       = df['atr_5'] / df['close']
+    df['candle_range']  = df['high'] - df['low']
+    df['return_1']      = df['close'].pct_change(1)
+    df['rsi_6']         = RSIIndicator(df['close'], window=6).rsi()
+    macd = MACD(df['close'], window_fast=6, window_slow=13, window_sign=5)
+    df['macd_fast']     = macd.macd()
+    df['macd_fast_diff']= macd.macd_diff()
+    df['chop_index'] = choppiness_index(df['high'], df['low'], df['close'])
+    df = detect_pivot_highs_lows(df, 5, 5)
+    df = detect_pivot_highs_lows(df,10,10)
+    df = detect_pivot_highs_lows(df,15,15)
 
-    # === ATR percentage of close
-    df['atr_14'] = AverageTrueRange(
-        high=df['high'], low=df['low'], close=df['close'], window=14
-    ).average_true_range()
-    df['atr_pct'] = df['atr_14'] / df['close']
+    df['hour'] = df['datetime'].dt.hour
 
-    # === MACD and MACD difference
-    macd = MACD(close=df['close'])
-    df['macd_fast'] = macd.macd()
-    df['macd_fast_diff'] = macd.macd_diff()
-
-    # === 1-bar return
-    df['return_1'] = df['close'].pct_change(periods=1)
-
-    # === Pivot logic
-    def pivot_high(series, left=2, right=2):
-        return series[(series.shift(left) < series) & (series.shift(-right) < series)]
-
-    def pivot_low(series, left=2, right=2):
-        return series[(series.shift(left) > series) & (series.shift(-right) > series)]
-
-    df['is_pivot_high_5'] = 0
-    df['is_pivot_low_5'] = 0
-    df.loc[pivot_high(df['high'], left=2, right=2).index, 'is_pivot_high_5'] = 1
-    df.loc[pivot_low(df['low'], left=2, right=2).index, 'is_pivot_low_5'] = 1
-
-    df['is_pivot_high_10'] = 0
-    df['is_pivot_low_10'] = 0
-    df.loc[pivot_high(df['high'], left=5, right=5).index, 'is_pivot_high_10'] = 1
-    df.loc[pivot_low(df['low'], left=5, right=5).index, 'is_pivot_low_10'] = 1
-
-    df.fillna(-999, inplace=True)
     return df

@@ -119,10 +119,10 @@ def act_on_model(df):
     pred_return = model.predict(X_new_scaled)[0]
 
     # === Trade direction based on threshold ===
-    if pred_return >= TRADE_THRESHOLD:
+    if pred_return >= TRADE_THRESHOLD and active_trade_side == None:
         side = "long"
         print(f"📈 Prediction: {pred_return:.4f} | Side: {side}")
-    elif pred_return <= -TRADE_THRESHOLD:
+    elif pred_return <= -TRADE_THRESHOLD and active_trade_side == None:
         side = "short"
         print(f"📉 Prediction: {pred_return:.4f} | Side: {side}")
     elif active_trade_side == "long" and pred_return < -TRADE_THRESHOLD and choppiness_index(df['high'], df['low'], df['close']).iloc[-1] > 55:
@@ -130,18 +130,13 @@ def act_on_model(df):
         with open(EXIT_FILE, "w") as f:
             f.write("action: exit\n")
             f.write("reason: counter_signal\n")
-        with open(STATUS_FILE, "w") as f:
-            f.write("flat")
         active_trade_side = None
         return  # Exit, let the next loop pick up the new signal
-
     elif active_trade_side == "short" and pred_return > TRADE_THRESHOLD and choppiness_index(df['high'], df['low'], df['close']).iloc[-1] > 55:
         print("🔁 Counter signal: SHORT -> LONG. Closing SHORT early.")
         with open(EXIT_FILE, "w") as f:
             f.write("action: exit\n")
             f.write("reason: counter_signal\n")
-        with open(STATUS_FILE, "w") as f:
-            f.write("flat")
         active_trade_side = None
         return
     else:
