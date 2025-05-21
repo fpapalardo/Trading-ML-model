@@ -78,14 +78,10 @@ def act_on_model(df):
     latest = df.iloc[-1]
     is_flat = check_trade_status()
 
-    features = [
-        'atr_5', 'atr_pct', 
-        'is_pivot_low_5', 'is_pivot_high_5', 
-        'ema_dist', 'is_pivot_high_10', 
-        'is_pivot_low_10', 'macd_fast_diff', 
-        'rsi_6', 'macd_fast', 
-        'is_pivot_high_15', 'is_pivot_low_15'
-    ]
+    features = ["atr_pct", "atr_5", "rsi_6", "ema_dist", "macd_fast", 
+     "macd_fast_diff", "is_pivot_low_15", 
+     "is_pivot_high_5", "is_pivot_low_5", 
+     "is_pivot_high_10", "is_pivot_low_10", "is_pivot_high_15"]
 
     if is_flat:
         X_new = df.iloc[[-1]][features]

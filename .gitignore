@@ -3,4 +3,4 @@
 *.csv
 *.db
 catboost_info
-*bar_data.csv
+live-trade/live_data/bar_data.csv
