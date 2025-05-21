@@ -57,6 +57,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 or for windows use https://pypi.org/project/pyenv-win/
+
 **Tested and ran with python 3.12.10**
 
 Install dependencies:
