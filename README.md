@@ -9,10 +9,9 @@ This project implements an advanced trading system that combines multiple machin
 ## 🌟 Key Features
 
 - **Ensemble Learning System**:
-  - Random Forest Regressor
-  - XGBoost Regressor
-  - ElasticNet Regression
-  - Stacking with Ridge meta-learner
+  - CatBoost Regressor
+  - LightGBM Regressor
+  - Stacking with CatBoost meta-learner
 
 - **Advanced Model Optimization**:
   - Optuna-based hyperparameter optimization
@@ -28,33 +27,21 @@ This project implements an advanced trading system that combines multiple machin
 
 ## 📈 Technical Indicators
 
-- **Price Action**:
-  - Pivot Points (High/Low)
-  - Candle Range Analysis
-  - Market Structure Detection
-
-- **Momentum**:
-  - RSI (Relative Strength Index)
-  - MACD (Moving Average Convergence Divergence)
-  - Price Return Calculations
-
-- **Volatility**:
-  - ATR (Average True Range)
-  - Choppiness Index
-  - Volatility-based entry/exit rules
-
-## 🛠 Prerequisites (Outdated)
+## 🛠 Prerequisites
 
 ```bash
-python 3.10+
+python 3.12.10
 pandas
 numpy
 scikit-learn
-xgboost
+seaborn
+lightgbm
+catboost
 optuna
-pandas-ta
+ta
 matplotlib
 joblib
+shap
 ```
 
 ⚙️ Installation
@@ -64,11 +51,13 @@ git clone https://github.com/yourusername/Trading-ML-model.git
 cd Trading-ML-model
 ```
 
-Create and activate virtual environment: (Tested and ran with python 3.12.10 **)
+Create and activate virtual environment:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
+or for windows use https://pypi.org/project/pyenv-win/
+**Tested and ran with python 3.12.10**
 
 Install dependencies:
 ```bash
@@ -82,7 +71,7 @@ pip install -r requirements.txt
 
 2. Model Training:
 ```bash
-python trading-ai.ipynb
+python trading-ai.ipynb or run using jupyter notebook
 ```
 
 3. Configuration: Key parameters can be adjusted in the notebook:
@@ -91,6 +80,9 @@ python trading-ai.ipynb
 `TP_ATR_MULT`: Take profit ATR multiplier
 `TRAIL_START_MULT`: Trailing stop trigger multiplier
 `TRAIL_STOP_MULT`: Trailing stop distance multiplier
+`BASE_CONTRACTS`: Minimum amount of contracts to use
+`MAX_CONTRACTS`: Max amount of contracts to use based on confidence
+`TRADE_THRESHOLD`: Threshold for entering trades
 
 📋 Project Structure
 ```
