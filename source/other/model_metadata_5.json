@@ -1,0 +1,51 @@
+{
+  "lookahead": 5,
+  "train_range": [
+    "2023-12-10 17:16:00-05:00",
+    "2024-12-31 17:00:00-05:00"
+  ],
+  "test_range": [
+    "2025-01-01 18:01:00-05:00",
+    "2025-05-19 08:00:00-04:00"
+  ],
+  "features_used": [
+    "atr_5",
+    "atr_pct",
+    "is_pivot_low_5",
+    "is_pivot_high_5",
+    "ema_dist",
+    "is_pivot_high_10",
+    "is_pivot_low_10",
+    "macd_fast_diff",
+    "rsi_6",
+    "macd_fast",
+    "is_pivot_high_15",
+    "is_pivot_low_15"
+  ],
+  "lgbm_params": {
+    "learning_rate": 0.01007967554729632,
+    "max_depth": 3,
+    "num_leaves": 36,
+    "min_child_samples": 30,
+    "subsample": 0.9992389836315201,
+    "colsample_bytree": 0.9996834686232552,
+    "reg_alpha": 0.7465480482865428,
+    "reg_lambda": 0.5455124006176374,
+    "min_split_gain": 0.007954385529095186,
+    "force_col_wise": false
+  },
+  "catboost_params": {
+    "depth": 7,
+    "learning_rate": 0.016908865013128976,
+    "l2_leaf_reg": 2.4692555589371628,
+    "bootstrap_type": "Bayesian",
+    "random_strength": 1.6323080975991489
+  },
+  "meta_params": {
+    "depth": 8,
+    "learning_rate": 0.0633380719233528,
+    "l2_leaf_reg": 3.2800910392549754,
+    "bootstrap_type": "Bayesian",
+    "random_strength": 0.9851082873519175
+  }
+}

@@ -7,19 +7,24 @@ import os
 import io
 from indicator_calculation import compute_indicators
 import traceback
+from collections import deque
 
 BAR_FILE = "./live_data/bar_data.csv"
 SIGNAL_FILE = "./trading/signal.txt"
 EXIT_FILE = "./trading/exit.txt"
 STATUS_FILE = "./trading/status.txt"
 
-TRADE_THRESHOLD = 0.0005
+TRADE_THRESHOLD = 0.001
 TICK_VALUE = 5
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 2.0
 TRAIL_START_MULT = 1.0
 TRAIL_STOP_MULT = 0.5
-MAX_CONTRACTS = 1
+
+# Order size
+BASE_CONTRACTS = 1
+MAX_CONTRACTS = 3
+PRED_HISTORY = deque(maxlen=100)
 
 # === Load model ===
 model = joblib.load("stack_model_LOOKAHEAD_5_session_less.pkl")
@@ -74,26 +79,31 @@ def act_on_model(df):
     is_flat = check_trade_status()
 
     features = [
-        'return_1',
-        'macd_fast_diff',
-        'atr_pct',
-        'rsi_6',
-        'is_pivot_low_5',
-        'atr_5',
-        'macd_fast',
-        'is_pivot_high_5',
-        'candle_range',
-        'chop_index',
-        'is_pivot_low_10',
-        'is_pivot_high_10',
-        'is_pivot_low_15',
-        'is_pivot_high_15',
-        'hour'
+        'atr_5', 'atr_pct', 
+        'is_pivot_low_5', 'is_pivot_high_5', 
+        'ema_dist', 'is_pivot_high_10', 
+        'is_pivot_low_10', 'macd_fast_diff', 
+        'rsi_6', 'macd_fast', 
+        'is_pivot_high_15', 'is_pivot_low_15'
     ]
 
     if is_flat:
         X_new = df.iloc[[-1]][features]
         pred = model.predict(X_new)[0]
+
+        # === Store pred for confidence scaling ===
+        PRED_HISTORY.append(pred)
+
+        # === Calculate confidence z-score
+        if len(PRED_HISTORY) >= 10:
+            preds_array = np.array(PRED_HISTORY)
+            zscore = (pred - preds_array.mean()) / (preds_array.std() + 1e-9)
+            conf = np.clip(abs(zscore), 0, 2.0)
+            position_size = BASE_CONTRACTS + (MAX_CONTRACTS - BASE_CONTRACTS) * (conf / 2.0)
+            position_size = round(position_size, 2)
+        else:
+            conf = 0
+            position_size = BASE_CONTRACTS  # fallback until history fills
 
         # === Trade direction based on threshold ===
         if pred  >= TRADE_THRESHOLD:
@@ -129,11 +139,13 @@ def act_on_model(df):
             f.write(f"take_profit: {tp_price:.2f}\n")
             f.write(f"stop_loss: {sl_price:.2f}\n")      
             f.write(f"trail_trigger: {trail_trigger:.2f}\n")
+            f.write(f"size: {position_size:.2f}\n")
 
         with open(STATUS_FILE, "w") as f:
             f.write(f"In Trade")  
 
-        print(f"[{latest['datetime']}] 🚀 Entry: {side.upper()} @ {entry_price:.2f} | SL: {sl_price:.2f} | TP: {tp_price:.2f} | TrailTrig: {trail_trigger:.2f}")
+        print(f"[{latest['datetime']}] 🚀 ENTRY: {side.upper()} | Size: {position_size} | Conf: {conf:.2f}")
+        print(f"[{latest['datetime']}] 🚀 ENTRY: {side.upper()} @ {entry_price:.2f} | SL: {sl_price:.2f} | TP: {tp_price:.2f} | TrailTrig: {trail_trigger:.2f}")
     else:
         atr = latest['atr_5']
         trail_stop = None

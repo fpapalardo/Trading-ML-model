@@ -29,13 +29,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # === Feature Engineering ===
     df['atr_5']         = AverageTrueRange(df['high'], df['low'], df['close'], window=5).average_true_range()
     df['atr_pct']       = df['atr_5'] / df['close']
-    df['candle_range']  = df['high'] - df['low']
-    df['return_1']      = df['close'].pct_change(1)
     df['rsi_6']         = RSIIndicator(df['close'], window=6).rsi()
     macd = MACD(df['close'], window_fast=6, window_slow=13, window_sign=5)
     df['macd_fast']     = macd.macd()
     df['macd_fast_diff']= macd.macd_diff()
     df['chop_index'] = choppiness_index(df['high'], df['low'], df['close'])
+    df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+    df['ema_dist'] = (df['close'] - df['ema_9'])
+    
     df = detect_pivot_highs_lows(df, 5, 5)
     df = detect_pivot_highs_lows(df,10,10)
     df = detect_pivot_highs_lows(df,15,15)
