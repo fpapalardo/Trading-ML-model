@@ -24,7 +24,7 @@ TRAIL_STOP_MULT = 0.5
 # Order size
 BASE_CONTRACTS = 1
 MAX_CONTRACTS = 3
-PRED_HISTORY = deque(maxlen=100)
+PRED_HISTORY = deque(maxlen=200)
 
 # === Load model ===
 model = joblib.load("stack_model_LOOKAHEAD_5_session_less.pkl")
@@ -40,7 +40,7 @@ active_trade_side = None  # Track active trade
 # === Load initial window ===
 df_window = pd.read_csv(BAR_FILE, names=["datetime", "open", "high", "low", "close", "volume"])
 df_window['datetime'] = pd.to_datetime(df_window['datetime'])
-df_window = df_window.tail(100).copy()
+df_window = df_window.tail(200).copy()
 
 def check_trade_status():
     global active_trade_side, entry_price, trail_trigger
@@ -58,15 +58,6 @@ def check_trade_status():
         except Exception as e:
             print(f"[Status Check] Error reading status file: {e}")
 
-def wait_for_next_minute():
-    """Wait until the next full minute plus 0.5 seconds (e.g., 08:01:00.500)."""
-    now = datetime.datetime.now()
-    next_minute = (now + datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
-    target_time = next_minute + datetime.timedelta(seconds=0.1)
-    sleep_duration = (target_time - now).total_seconds()
-    if sleep_duration > 0:
-        time.sleep(sleep_duration)
-
 def act_on_model(df):
     global active_trade_side, trail_trigger, entry_price
 
@@ -78,14 +69,23 @@ def act_on_model(df):
     latest = df.iloc[-1]
     is_flat = check_trade_status()
 
-    features = ["atr_pct", "atr_5", "rsi_6", "ema_dist", "macd_fast", 
-     "macd_fast_diff", "is_pivot_low_15", 
-     "is_pivot_high_5", "is_pivot_low_5", 
-     "is_pivot_high_10", "is_pivot_low_10", "is_pivot_high_15"]
+    features = ["atr_pct", "bollinger_width", "is_pivot_high_5", "is_pivot_low_5", 
+                "ema_dist", "is_pivot_high_10", "is_pivot_low_10", "macd_fast_diff", "volume_delta_ema", "macd_fast", "rsi_6", 
+                "is_pivot_low_15", "ema_slope", "volume", "is_pivot_high_15", "bollinger_z",
+                "atr_5", "adx", "session_code", "chop_index"]
 
     if is_flat:
         X_new = df.iloc[[-1]][features]
         pred = model.predict(X_new)[0]
+        
+        print("LIVE FEATURES:")
+        print(df.iloc[[-1]][features])
+        print("PRED:", pred)
+
+
+        print("LIVE FEATURES:")
+        print(latest[features])
+        print("PRED:", pred)
 
         # === Store pred for confidence scaling ===
         PRED_HISTORY.append(pred)
@@ -102,9 +102,9 @@ def act_on_model(df):
             position_size = BASE_CONTRACTS  # fallback until history fills
 
         # === Trade direction based on threshold ===
-        if pred  >= TRADE_THRESHOLD:
+        if pred >= TRADE_THRESHOLD:
             side = "long"
-        elif pred  <= -TRADE_THRESHOLD:
+        elif pred <= -TRADE_THRESHOLD:
             side = "short"
         else:
             print(f"⏭️ Skipping: Prediction {pred :.4f} not strong enough.")
@@ -124,8 +124,6 @@ def act_on_model(df):
         tp_price = entry_price + tp_move if side == "long" else entry_price - tp_move
         trail_trigger = entry_price + TRAIL_START_MULT * atr if side == "long" else entry_price - TRAIL_START_MULT * atr
 
-        active_trade_side = side
-    
         # New trade, write full entry and SL/TP
         active_trade_side = side
         with open(SIGNAL_FILE, "w") as f:
@@ -140,7 +138,7 @@ def act_on_model(df):
         with open(STATUS_FILE, "w") as f:
             f.write(f"In Trade")  
 
-        print(f"[{latest['datetime']}] 🚀 ENTRY: {side.upper()} | Size: {position_size} | Conf: {conf:.2f}")
+        print(f"[{latest['datetime']}] 🚀 ENTRY: {side.upper()} | Size: {position_size} | Conf: {conf:.5f}")
         print(f"[{latest['datetime']}] 🚀 ENTRY: {side.upper()} @ {entry_price:.2f} | SL: {sl_price:.2f} | TP: {tp_price:.2f} | TrailTrig: {trail_trigger:.2f}")
     else:
         atr = latest['atr_5']
@@ -162,7 +160,7 @@ def act_on_model(df):
 
 def process_new_bar(bar_df):
     global df_window
-    df_window = pd.concat([df_window, bar_df], ignore_index=True).tail(100)
+    df_window = pd.concat([df_window, bar_df], ignore_index=True).tail(200)
     act_on_model(df_window)
 
 def tail_csv(file_path, callback, sleep_interval=0.02):
