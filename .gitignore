@@ -4,3 +4,4 @@
 *.db
 catboost_info
 live-trade/live_data/bar_data.csv
+__pycache__
