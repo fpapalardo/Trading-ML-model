@@ -2,6 +2,11 @@
 *.pkl
 *.csv
 *.db
-catboost_info
-live-trade/live_data/bar_data.csv
-__pycache__
+
+src/notebooks/catboost_info/
+
+live-trade/live_data/*.csv
+src/notebooks/*.json
+
+__pycache__/
+**/__pycache__/
