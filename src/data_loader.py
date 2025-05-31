@@ -61,3 +61,70 @@ def load_and_resample_data(folder_path="./../data/", timeframes=['5min', '15min'
 
 
     return df, resampled
+
+def apply_feature_engineering(
+    resampled: dict,
+    add_all_features,
+    add_time_session_features,
+    timeframes: list = ['5min'],
+    base_tf: str = '5min'
+):
+    print("--- Starting Feature Engineering Execution ---")
+
+    # --- Input Validations ---
+    if base_tf not in timeframes:
+        raise ValueError(f"Base timeframe '{base_tf}' must be included in the `timeframes` list.")
+
+    missing_tfs = [tf for tf in timeframes if tf not in resampled]
+    if missing_tfs:
+        raise ValueError(f"The following requested timeframes are missing from resampled data: {missing_tfs}")
+
+    if not callable(add_all_features):
+        raise NameError("Function 'add_all_features' must be provided.")
+    if not callable(add_time_session_features):
+        raise NameError("Function 'add_time_session_features' must be provided.")
+
+    expected_cols = ['open', 'high', 'low', 'close', 'volume']
+    for tf in timeframes:
+        df = resampled[tf]
+        if not all(col in df.columns for col in expected_cols):
+            raise ValueError(f"Timeframe '{tf}' missing required OHLCV columns.")
+
+    # --- Generate Features ---
+    feature_dfs = {}
+    for tf in timeframes:
+        suffix = f"_{tf}"
+        print(f"\nGenerating features for timeframe: {tf} — shape: {resampled[tf].shape}")
+        feature_dfs[tf] = add_all_features(resampled[tf].copy(), suffix=suffix)
+        print(f"Output shape for {tf}: {feature_dfs[tf].shape}")
+
+    # --- Add Time/Session Features to Base Timeframe ---
+    print(f"\nAdding time/session features to base timeframe: {base_tf}")
+    df_base = add_time_session_features(feature_dfs[base_tf].copy())
+
+    # --- Merge All Other Timeframes ---
+    print("\nMerging additional timeframe features into base...")
+    df_merged = df_base.sort_index()
+
+    for tf in timeframes:
+        if tf == base_tf:
+            continue
+
+        suffix = f"_{tf}"
+        cols_to_merge = [col for col in feature_dfs[tf].columns if col.endswith(suffix)]
+        if not cols_to_merge:
+            print(f"⚠️ No columns with suffix {suffix} in {tf}; skipping merge.")
+            continue
+
+        df_to_merge = feature_dfs[tf][cols_to_merge].sort_index()
+        df_merged = pd.merge_asof(
+            df_merged,
+            df_to_merge,
+            left_index=True,
+            right_index=True,
+            direction='backward'
+        )
+
+    print("--- Feature Engineering Execution COMPLETE ---")
+    print(f"Final df_merged shape: {df_merged.shape}")
+    return df_merged
