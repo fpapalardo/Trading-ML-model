@@ -2,6 +2,10 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 
+from collections import defaultdict
+import numpy as np
+import pandas as pd
+
 def evaluate_regression(
     X_test, preds_stack, labeled, df,
     avoid_funcs,
@@ -25,7 +29,6 @@ def evaluate_regression(
     X_test_idx = X_test.index.to_list()
     preds_array = preds_stack
 
-    # === Confidence & Position Size ===
     zscores = (preds_array - preds_array.mean()) / (preds_array.std() + 1e-9)
     zscores = np.clip(zscores, -3.0, 3.0)
     conf_scores = np.clip(np.abs(zscores), 0, 2.0)
@@ -35,13 +38,16 @@ def evaluate_regression(
     i = 0
     while i < len(X_test_idx):
         idx = X_test_idx[i]
-
-        if df.index.get_loc(idx) + 1 >= len(df):
+        idx_loc = labeled.index.get_loc(idx)
+        
+        if idx_loc + 1 >= len(labeled):
             skipped_trades += 1
             i += 1
             continue
 
-        row = labeled.loc[idx]
+        row = labeled.iloc[idx_loc]             # Prediction based on bar N
+        entry_row = labeled.iloc[idx_loc + 1]   # Entry at bar N+1
+
         vol_adj_pred = preds_array[i]
         conf = conf_scores[i]
         size = position_sizes[i]
@@ -60,7 +66,7 @@ def evaluate_regression(
         skip_trade = False
         for name, f in avoid_funcs.items():
             try:
-                if f(row):
+                if f(row):  # apply avoid checks on bar N
                     avoid_hits[name] += 1
                     skip_trade = True
             except:
@@ -70,10 +76,9 @@ def evaluate_regression(
             i += 1
             continue
 
-        # --- Trade Simulation ---
-        entry_price = row['open']
-        entry_time = row.name
-        atr = row['ATR_14_5m']
+        entry_price = entry_row['open']
+        entry_time = row.name - pd.Timedelta(minutes=5)
+        atr = row['ATR_14_5min']
 
         expected_move = abs(vol_adj_pred) * entry_price
         min_tp = 0.005 * entry_price
@@ -82,9 +87,8 @@ def evaluate_regression(
         tp_price = entry_price + tp_move if side == 'long' else entry_price - tp_move
 
         sl_move = SL_ATR_MULT * atr
-        if sl_move > tp_move:
-            sl_move = tp_move
-
+        # if sl_move > tp_move:
+        #     sl_move = tp_move
         sl_price = entry_price - sl_move if side == 'long' else entry_price + sl_move
 
         trail_trigger = entry_price + TRAIL_START_MULT * atr if side == 'long' else entry_price - TRAIL_START_MULT * atr
@@ -92,7 +96,7 @@ def evaluate_regression(
         max_price, min_price = entry_price, entry_price
         exit_price, exit_time = None, None
 
-        fwd_idx = labeled.index.get_loc(idx) + 1
+        fwd_idx = labeled.index.get_loc(entry_row.name) + 1
         while fwd_idx < len(df):
             fwd_row = labeled.iloc[fwd_idx]
             max_price = max(max_price, fwd_row['high'])
@@ -154,7 +158,6 @@ def evaluate_regression(
         while i < len(X_test_idx) and labeled.loc[X_test_idx[i]].name <= exit_time:
             i += 1
 
-    # === Metrics ===
     results = pd.DataFrame(temp_trades_data)
     pnl_total = results['pnl'].sum() if not results.empty else 0
     trades = len(results)
@@ -162,8 +165,6 @@ def evaluate_regression(
     expectancy = results['pnl'].mean() if not results.empty else 0
     profit_factor = results[results['pnl'] > 0]['pnl'].sum() / abs(results[results['pnl'] < 0]['pnl'].sum()) if not results.empty and (results['pnl'] < 0).any() else np.nan
     sharpe = results['pnl'].mean() / (results['pnl'].std() + 1e-9) * np.sqrt(trades) if trades > 1 else 0
-
-    # === Average Confidence for Wins and Losses ===
     avg_confidence_win = abs(results[results['pnl'] > 0]['vol_adj_pred']).mean() if not results.empty else np.nan
     avg_confidence_loss = abs(results[results['pnl'] <= 0]['vol_adj_pred']).mean() if not results.empty else np.nan
 
@@ -182,6 +183,7 @@ def evaluate_regression(
         'avg_confidence_win': avg_confidence_win,
         'avg_confidence_loss': avg_confidence_loss
     }
+
 
 def evaluate_classification(
     X_test, preds_stack, preds_xgboost, labeled, df,
@@ -272,7 +274,7 @@ def evaluate_classification(
 
         entry_price = df.iloc[entry_pos + 1]['open']
         entry_time = df.iloc[entry_pos + 1]['datetime']
-        atr = row['atr_5']
+        atr = row['ATR_14_5min']
 
         # Stop Loss (fixed volatility-based)
         sl_price = entry_price - SL_ATR_MULT * atr if side == 'long' else entry_price + SL_ATR_MULT * atr
@@ -464,7 +466,7 @@ def evaluate_combo(
 
         entry_price = df.loc[idx + 1, 'open']
         entry_time = df.loc[idx + 1, 'datetime']
-        atr = row['atr_5']
+        atr = row['ATR_14_5min']
 
         expected_move = abs(reg_pred) * entry_price
         tp_move = np.clip(expected_move, 0.001 * entry_price, TP_ATR_MULT * atr)
