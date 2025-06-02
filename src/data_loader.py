@@ -3,7 +3,7 @@ import platform
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def load_and_resample_data(folder_path="./../data/", timeframes=['5min', '15min', '1h']):
+def load_and_resample_data(market_hint, timeframes=['5min', '15min', '1h'], root_folder="./../data/"):
     column_names = ['datetime', 'open', 'high', 'low', 'close', 'volume']
     df_list = []
 
@@ -14,23 +14,37 @@ def load_and_resample_data(folder_path="./../data/", timeframes=['5min', '15min'
     elif system == 'Linux':
         plt.rcParams['font.family'] = 'Noto Color Emoji'
 
-    # Read and concatenate files
-    for filename in os.listdir(folder_path):
+    # 🔍 Search for matching subfolder
+    target_folder = None
+    for subfolder in os.listdir(root_folder):
+        full_path = os.path.join(root_folder, subfolder)
+        if os.path.isdir(full_path) and market_hint.lower() in subfolder.lower():
+            target_folder = full_path
+            break
+
+    if not target_folder:
+        raise FileNotFoundError(f"No folder found in {root_folder} containing '{market_hint}'.")
+
+    print(f"📁 Found matching folder: {target_folder}")
+
+    # 📥 Load files
+    for filename in os.listdir(target_folder):
         if filename.endswith(('.csv', '.txt')):
-            file_path = os.path.join(folder_path, filename)
+            file_path = os.path.join(target_folder, filename)
             df_temp = pd.read_csv(file_path, sep=';', header=None, names=column_names, on_bad_lines='warn')
             df_list.append(df_temp)
 
     if not df_list:
-        raise ValueError("No data files found in folder.")
+        raise ValueError("No data files found in matching folder.")
 
+    # 🧹 Cleanup & Normalize
     df = pd.concat(df_list, ignore_index=True)
     df['datetime'] = pd.to_datetime(df['datetime'], utc=True).dt.tz_convert('America/New_York')
     df = df.drop_duplicates(subset='datetime', keep='first').sort_values('datetime').reset_index(drop=True)
     df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
     df = df.set_index('datetime')
 
-    # === Dynamic resampling with validated timeframes ===
+    # 🕒 Timeframe Mapping
     valid_timeframes = {
         '1min': '1min',
         '3min': '3min',
@@ -58,7 +72,6 @@ def load_and_resample_data(folder_path="./../data/", timeframes=['5min', '15min'
             'volume': 'sum'
         }).dropna()
         resampled[tf] = resampled_df
-
 
     return df, resampled
 
