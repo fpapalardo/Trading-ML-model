@@ -1,32 +1,5 @@
 # Advanced Trading ML Model
-
-A sophisticated machine learning-based trading system utilizing ensemble methods for market prediction and automated trading execution.
-
-## 📊 Overview
-
-This project implements an advanced trading system that combines multiple machine learning models to predict market movements and execute trades with robust risk management. The system uses ensemble learning techniques including Random Forest, XGBoost, and ElasticNet with a stacking approach.
-
-## 🌟 Key Features
-
-- **Ensemble Learning System**:
-  - CatBoost Regressor
-  - LightGBM Regressor
-  - Stacking with CatBoost meta-learner
-
-- **Advanced Model Optimization**:
-  - Optuna-based hyperparameter optimization
-  - Dynamic threshold adjustment
-  - Cross-validation with time series split
-  - Performance monitoring and adaptation
-
-- **Risk Management**:
-  - Dynamic stop-loss based on ATR
-  - Trailing stop implementation
-  - Position sizing rules
-  - Session-based trading restrictions
-
-## 📈 Technical Indicators
-
+# (OUTDATED)
 ## 🛠 Prerequisites
 
 ```bash
@@ -71,31 +44,31 @@ pip install -r requirements.txt
     - Supported format: CSV with OHLCV data
 
 2. Model Training:
-```bash
-python trading-ai.ipynb or run using jupyter notebook
-```
-
-3. Configuration: Key parameters can be adjusted in the notebook:
-`LOOKAHEAD`: Prediction timeframe [5, 15 minutes]
-`SL_ATR_MULT`: Stop loss ATR multiplier
-`TP_ATR_MULT`: Take profit ATR multiplier
-`TRAIL_START_MULT`: Trailing stop trigger multiplier
-`TRAIL_STOP_MULT`: Trailing stop distance multiplier
-`BASE_CONTRACTS`: Minimum amount of contracts to use
-`MAX_CONTRACTS`: Max amount of contracts to use based on confidence
-`TRADE_THRESHOLD`: Threshold for entering trades
+Run using jupyter notebook for experimentation there is helper functions to reduce the amount of cells in each notebooks
 
 📋 Project Structure
 ```
 Trading-ML-model/
 │
 ├── live-trade/          # Python handler to use for trading with the model
-├── models/              # Saved model files
-├── source/              # Source code of training model
+│     ├── trading/                  # Files for NT8
+|     ├── indicator_calculation.py  # Indicator processing
+|     └── live_trading.py           # Live Trading module
+├── src/              # Source code of training model
 │     ├── data/         # Market data files
-|     └── other/         # Market data files
-│           └── trading-ai.ipynb     # Main training notebook
-└── README.md            # Project documentation
+│     ├── notebooks/        # Market data files
+│     │      ├── dbs/       # Optuna DBs
+│     │      ├── parquet/   # Parquet Files
+│     │      ├── pkl/       # PKL Files
+│     │      └── *.ipynb    # Model Training
+|     ├── data_loader.py    # Data loader for initialization
+|     ├── backtest.py       # Backtest Logic
+|     ├── helpers.py        # Helper functions
+|     └── labeling_utils.py # Labeling
+├── README.md            # Project documentation
+├── .gitignore
+├── .gittributes
+└── requirements.txt
 ```
 
 🔬 Model Architecture
