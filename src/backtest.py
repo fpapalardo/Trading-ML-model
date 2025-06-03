@@ -130,7 +130,7 @@ def evaluate_regression(
             exit_price = fallback_row['close']
             exit_time = fallback_row.name
 
-        if not is_same_session(entry_time, exit_time):
+        if is_same_session and not is_same_session(entry_time, exit_time):
             i += 1
             continue
 
