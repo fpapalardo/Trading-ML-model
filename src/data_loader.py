@@ -79,6 +79,7 @@ def apply_feature_engineering(
     resampled: dict,
     add_all_features,
     add_time_session_features,
+    add_trend_features,
     timeframes: list = ['5min'],
     base_tf: str = '5min'
 ):
@@ -96,6 +97,8 @@ def apply_feature_engineering(
         raise NameError("Function 'add_all_features' must be provided.")
     if not callable(add_time_session_features):
         raise NameError("Function 'add_time_session_features' must be provided.")
+    if not callable(add_trend_features):
+        raise NameError("Function 'add_trend_features' must be provided.")
 
     expected_cols = ['open', 'high', 'low', 'close', 'volume']
     for tf in timeframes:
@@ -108,7 +111,15 @@ def apply_feature_engineering(
     for tf in timeframes:
         suffix = f"_{tf}"
         print(f"\nGenerating features for timeframe: {tf} — shape: {resampled[tf].shape}")
-        feature_dfs[tf] = add_all_features(resampled[tf].copy(), suffix=suffix)
+        
+        # First add standard features
+        df_with_features = add_all_features(resampled[tf].copy(), suffix=suffix)
+        
+        # Then add trend features
+        print(f"Adding trend features for timeframe: {tf}")
+        df_with_features = add_trend_features(df_with_features, suffix=suffix)
+        
+        feature_dfs[tf] = df_with_features
         print(f"Output shape for {tf}: {feature_dfs[tf].shape}")
 
     # --- Add Time/Session Features to Base Timeframe ---

@@ -4,6 +4,13 @@ import numpy as np
 import pandas as pd
 import numba
 
+def transform_target(y, scale_factor=1000):
+    """
+    Transform the target variable to handle small values better
+    """
+    # Apply sigmoid-like transformation while preserving sign
+    return np.sign(y) * np.tanh(np.abs(y) * scale_factor)
+
 @numba.jit(nopython=True, nogil=True)
 def _calculate_triple_barrier_labels_numba_core(
     entry_prices_arr: np.ndarray, high_prices_arr: np.ndarray, low_prices_arr: np.ndarray, atr_arr: np.ndarray,
@@ -82,7 +89,8 @@ def compute_classification_labels_triple_barrier_numba(
 def compute_regression_labels(
     df: pd.DataFrame, price_col_entry: str = 'open', price_col_exit: str = 'close', lookahead: int = 6,
     vol_col: str = 'ATR_14_5m', min_vol_threshold: float = 0.0001, cap_outliers: bool = True,
-    lower_cap_percentile: float = 0.5, upper_cap_percentile: float = 99.5, same_day_trade: bool = True
+    lower_cap_percentile: float = 0.5, upper_cap_percentile: float = 99.5, same_day_trade: bool = True,
+    should_transform=True, scale_factor=1000
 ) -> pd.Series:
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("Index must be DatetimeIndex.")
@@ -127,6 +135,9 @@ def compute_regression_labels(
             lower_b = np.nanpercentile(valid_returns, lower_cap_percentile)
             upper_b = np.nanpercentile(valid_returns, upper_cap_percentile)
             normalized_returns = normalized_returns.clip(lower=lower_b, upper=upper_b)
+
+    if should_transform:
+        normalized_returns = transform_target(normalized_returns, scale_factor)  # Use your existing transform_target function
 
     return normalized_returns.rename(f'reg_target_lookahead{lookahead}')
 
