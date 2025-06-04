@@ -6,6 +6,9 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
+def round_to_tick(price, tick_size=0.25):
+    return round(price / tick_size) * tick_size
+
 def evaluate_regression(
     X_test, preds_stack, labeled, df,
     avoid_funcs,
@@ -77,7 +80,7 @@ def evaluate_regression(
             continue
 
         entry_price = entry_row['open']
-        entry_time = row.name - pd.Timedelta(minutes=5)
+        entry_time = row.name
         atr = row['ATR_14_5min']
 
         expected_move = abs(vol_adj_pred) * entry_price
@@ -85,39 +88,63 @@ def evaluate_regression(
         max_tp = TP_ATR_MULT * atr
         tp_move = np.clip(expected_move, min_tp, max_tp)
         tp_price = entry_price + tp_move if side == 'long' else entry_price - tp_move
+        tp_price = round_to_tick(tp_price)
 
         sl_move = SL_ATR_MULT * atr
         # if sl_move > tp_move:
         #     sl_move = tp_move
         sl_price = entry_price - sl_move if side == 'long' else entry_price + sl_move
+        sl_price = round_to_tick(sl_price)
 
         trail_trigger = entry_price + TRAIL_START_MULT * atr if side == 'long' else entry_price - TRAIL_START_MULT * atr
         trail_stop = None
         max_price, min_price = entry_price, entry_price
         exit_price, exit_time = None, None
 
-        fwd_idx = labeled.index.get_loc(entry_row.name) + 1
+        fwd_idx = labeled.index.get_loc(entry_row.name)
+        trail_stop = None
+        trail_set_idx = None
         while fwd_idx < len(df):
             fwd_row = labeled.iloc[fwd_idx]
             max_price = max(max_price, fwd_row['high'])
             min_price = min(min_price, fwd_row['low'])
 
-            if (side == 'long' and fwd_row['low'] <= sl_price) or (side == 'short' and fwd_row['high'] >= sl_price):
+            if side == 'long':
+                sl_hit = fwd_row['low'] <= sl_price
+                tp_hit = fwd_row['high'] >= tp_price
+            elif side == 'short':
+                sl_hit = fwd_row['high'] >= sl_price
+                tp_hit = fwd_row['low'] <= tp_price
+
+            if sl_hit and tp_hit:
+                # SL takes precedence — assume worst case
                 exit_price = sl_price
                 exit_time = fwd_row.name
                 break
-
-            if (side == 'long' and fwd_row['high'] >= tp_price) or (side == 'short' and fwd_row['low'] <= tp_price):
+            elif sl_hit:
+                exit_price = sl_price
+                exit_time = fwd_row.name
+                break
+            elif tp_hit:
                 exit_price = tp_price
                 exit_time = fwd_row.name
                 break
 
+            # === Trailing Stop Update ===
             if side == 'long' and fwd_row['high'] >= trail_trigger:
-                trail_stop = fwd_row['close'] - TRAIL_STOP_MULT * atr
-            if side == 'short' and fwd_row['low'] <= trail_trigger:
-                trail_stop = fwd_row['close'] + TRAIL_STOP_MULT * atr
+                new_trail_stop = fwd_row['close'] - TRAIL_STOP_MULT * atr
+                if trail_stop is None or new_trail_stop > trail_stop:
+                    trail_stop = new_trail_stop
+                    trail_set_idx = fwd_idx  # mark when it was set
 
-            if trail_stop:
+            elif side == 'short' and fwd_row['low'] <= trail_trigger:
+                new_trail_stop = fwd_row['close'] + TRAIL_STOP_MULT * atr
+                if trail_stop is None or new_trail_stop < trail_stop:
+                    trail_stop = new_trail_stop
+                    trail_set_idx = fwd_idx
+
+            # === Trailing Stop Check (only after being set) ===
+            if trail_stop is not None and fwd_idx > trail_set_idx:
                 if (side == 'long' and fwd_row['low'] <= trail_stop) or (side == 'short' and fwd_row['high'] >= trail_stop):
                     exit_price = trail_stop
                     exit_time = fwd_row.name
@@ -183,7 +210,6 @@ def evaluate_regression(
         'avg_confidence_win': avg_confidence_win,
         'avg_confidence_loss': avg_confidence_loss
     }
-
 
 def evaluate_classification(
     X_test, preds_stack, preds_xgboost, labeled, df,
