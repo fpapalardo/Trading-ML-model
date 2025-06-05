@@ -7,51 +7,82 @@ import numpy as np
 import pandas as pd
 
 def evaluate_regression(
-    X_test, preds_stack, labeled, df,
+    X_test, 
+    preds_stack, 
+    labeled, 
+    df,
     avoid_funcs,
-    SL_ATR_MULT, TP_ATR_MULT, TRAIL_START_MULT, TRAIL_STOP_MULT, TICK_VALUE,
+    TRAIL_START_MULT, 
+    TRAIL_STOP_MULT,
+    #–––  You used to pass a single SL and TP multiplier.  Now we pass three of each:
+    TICK_VALUE,
     is_same_session,
     long_thresh,
     short_thresh,
     base_contracts=1,
-    max_contracts=5,
-    skip_weak_conf=False,
-    weak_conf_zscore=0.2,
-    stack_weight=0.4,
-    cnn_weight=0.3
+    max_contracts=5, 
+    SL_ATR_MULT_TREND: float = 1.0, SL_ATR_MULT_CHOP: float = 0.5, SL_ATR_MULT_DEFAULT: float  = 1.0,
+    TP_ATR_MULT_TREND: float = 3.0, TP_ATR_MULT_CHOP: float = 1.0, TP_ATR_MULT_DEFAULT: float = 2.0
 ):
+    """
+    Backtest a set of “vol‐adjusted” predictions (preds_stack) on the `labeled` DataFrame.
+    At each bar N we decide to go long/short on bar N+1 (using same‐session rules, avoid_funcs, etc.).
+    We now inject regime‐aware SL/TP by reading row['ADX_14_5min'] and row['CHOP_14_1_100_5min'].
+
+    -----------------------------------------------------------------------
+    PARAMETERS (only noting the regime‐related additions):
+
+      SL_ATR_MULT_TREND      – when ADX>25 and CHOP<50  (strong trend), use this ATR for stop loss
+      TP_ATR_MULT_TREND      – when ADX>25 and CHOP<50  (strong trend), use this ATR for take profit
+
+      SL_ATR_MULT_CHOP       – when CHOP>60 (choppy market), use this ATR for stop loss
+      TP_ATR_MULT_CHOP       – when CHOP>60 (choppy market), use this ATR for take profit
+
+      SL_ATR_MULT_DEFAULT    – otherwise (neither strongly trending nor choppy), use this ATR for SL
+      TP_ATR_MULT_DEFAULT    – otherwise (neither strongly trending nor choppy), use this ATR for TP
+
+    RETURNS:
+      A dict containing PnL, trade statistics, and a DataFrame 'results' where each row includes:
+        - entry_time, exit_time, side, entry_price, exit_price, pnl, mfe, mae, gross_pnl
+        - vol_adj_pred, confidence, position_size, exit_reason, used_trailing
+    """
+    from collections import defaultdict
+
     temp_trades_data = []
     skipped_trades = 0
     avoid_hits = defaultdict(int)
     long_trades = 0
     short_trades = 0
 
-    X_test_idx = X_test.index.to_list()
-    preds_array = preds_stack
+    X_test_idx   = X_test.index.to_list()
+    preds_array  = preds_stack
 
-    zscores = (preds_array - preds_array.mean()) / (preds_array.std() + 1e-9)
-    zscores = np.clip(zscores, -3.0, 3.0)
-    conf_scores = np.clip(np.abs(zscores), 0, 2.0)
+    # Convert raw preds_stack into a “confidence score” (z‐score clipped to ±3)
+    zscores        = (preds_array - preds_array.mean()) / (preds_array.std() + 1e-9)
+    zscores        = np.clip(zscores, -3.0, 3.0)
+    conf_scores    = np.clip(np.abs(zscores), 0, 2.0)
     position_sizes = base_contracts + (max_contracts - base_contracts) * (conf_scores / 2.0)
     position_sizes = np.round(position_sizes, 0)
 
     i = 0
     while i < len(X_test_idx):
-        idx = X_test_idx[i]
-        idx_loc = labeled.index.get_loc(idx)
+        idx      = X_test_idx[i]
+        idx_loc  = labeled.index.get_loc(idx)
         
+        # If we cannot enter on N+1 (beyond data), skip
         if idx_loc + 1 >= len(labeled):
             skipped_trades += 1
             i += 1
             continue
 
-        row = labeled.iloc[idx_loc]             # Prediction based on bar N
-        entry_row = labeled.iloc[idx_loc + 1]   # Entry at bar N+1
+        row       = labeled.iloc[idx_loc]             # bar N (features + actual reg targets)
+        entry_row = labeled.iloc[idx_loc + 1]         # bar N+1 (where we actually enter)
 
         vol_adj_pred = preds_array[i]
-        conf = conf_scores[i]
-        size = position_sizes[i]
+        conf         = conf_scores[i]
+        size         = position_sizes[i]
 
+        # Decide direction
         if vol_adj_pred >= long_thresh:
             side = 'long'
             long_trades += 1
@@ -63,127 +94,199 @@ def evaluate_regression(
             i += 1
             continue
 
+        # Apply “avoid” filters (e.g. avoid on news, avoid on Bollinger squeeze, etc.)
         skip_trade = False
         for name, f in avoid_funcs.items():
             try:
-                if f(row):  # apply avoid checks on bar N
+                if f(row):  
                     avoid_hits[name] += 1
                     skip_trade = True
             except:
-                continue
+                pass
         if skip_trade:
             skipped_trades += 1
             i += 1
             continue
 
         entry_price = entry_row['open']
-        entry_time = row.name - pd.Timedelta(minutes=5)
-        atr = row['ATR_14_5min']
+        entry_time  = row.name - pd.Timedelta(minutes=5)  
+        atr         = row['ATR_14_5min']
+        adx_val     = row['ADX_14_5min']
+        chop_val    = row['CHOP_14_1_100_5min']
 
-        expected_move = abs(vol_adj_pred) * entry_price
-        min_tp = 0.005 * entry_price
-        max_tp = TP_ATR_MULT * atr
-        tp_move = np.clip(expected_move, min_tp, max_tp)
+        # ──── REGIME LOGIC: choose SL/TP‐ATR multipliers based on (ADX, CHOP) ────
+        if (adx_val > 25.0) and (chop_val < 50.0):
+            # strong trend
+            sl_mult = SL_ATR_MULT_TREND
+            tp_mult = TP_ATR_MULT_TREND
+        elif (chop_val > 60.0):
+            # choppy
+            sl_mult = SL_ATR_MULT_CHOP
+            tp_mult = TP_ATR_MULT_CHOP
+        else:
+            # default
+            sl_mult = SL_ATR_MULT_DEFAULT
+            tp_mult = TP_ATR_MULT_DEFAULT
+        # ────────────────────────────────────────────────────────────────────
+
+        # If ATR or entry price is nonsense, skip
+        if entry_price <= 0 or atr <= 0:
+            skipped_trades += 1
+            i += 1
+            continue
+
+        # Compute actual SL/TP distances in price‐units:
+        sl_move = sl_mult * atr
+        tp_move = tp_mult * atr
+
+        # enforce a minimum TP of 0.5% of entry_price
+        min_tp = 0.005 * entry_price      
+        tp_move = np.clip(tp_move, min_tp, tp_move)
+
+        if sl_move > tp_move:
+            sl_move = tp_move
+
         tp_price = entry_price + tp_move if side == 'long' else entry_price - tp_move
+        sl_price = entry_price - sl_move  if side == 'long' else entry_price + sl_move
 
-        sl_move = SL_ATR_MULT * atr
-        # if sl_move > tp_move:
-        #     sl_move = tp_move
-        sl_price = entry_price - sl_move if side == 'long' else entry_price + sl_move
+        # ──── TRAILING LOGIC: ────
+        trail_trigger = (
+            entry_price + TRAIL_START_MULT * atr
+            if side == 'long'
+            else entry_price - TRAIL_START_MULT * atr
+        )
+        trail_stop    = None
+        used_trailing = False
 
-        trail_trigger = entry_price + TRAIL_START_MULT * atr if side == 'long' else entry_price - TRAIL_START_MULT * atr
-        trail_stop = None
-        max_price, min_price = entry_price, entry_price
-        exit_price, exit_time = None, None
+        max_price  = entry_price
+        min_price  = entry_price
+        exit_price = None
+        exit_time  = None
+        exit_reason = None
 
+        # Iterate forward until SL, TP, trailing, or session‐end
         fwd_idx = labeled.index.get_loc(entry_row.name) + 1
         while fwd_idx < len(df):
             fwd_row = labeled.iloc[fwd_idx]
             max_price = max(max_price, fwd_row['high'])
             min_price = min(min_price, fwd_row['low'])
 
-            if (side == 'long' and fwd_row['low'] <= sl_price) or (side == 'short' and fwd_row['high'] >= sl_price):
-                exit_price = sl_price
-                exit_time = fwd_row.name
+            # 1) Check SL first
+            if (side == 'long'  and fwd_row['low']  <= sl_price)  or \
+               (side == 'short' and fwd_row['high'] >= sl_price):
+                exit_price  = sl_price
+                exit_time   = fwd_row.name
+                exit_reason = "SL"
                 break
 
-            if (side == 'long' and fwd_row['high'] >= tp_price) or (side == 'short' and fwd_row['low'] <= tp_price):
-                exit_price = tp_price
-                exit_time = fwd_row.name
+            # 2) Check TP second
+            if (side == 'long'  and fwd_row['high'] >= tp_price)  or \
+               (side == 'short' and fwd_row['low']  <= tp_price):
+                exit_price  = tp_price
+                exit_time   = fwd_row.name
+                exit_reason = "TP"
                 break
 
-            if side == 'long' and fwd_row['high'] >= trail_trigger:
-                trail_stop = fwd_row['close'] - TRAIL_STOP_MULT * atr
-            if side == 'short' and fwd_row['low'] <= trail_trigger:
-                trail_stop = fwd_row['close'] + TRAIL_STOP_MULT * atr
+            # 3) Update trailing stop if trigger hit
+            if (TRAIL_START_MULT > 0) and (TRAIL_STOP_MULT > 0):
+                if side == 'long' and fwd_row['high'] >= trail_trigger:
+                    trail_stop    = fwd_row['close'] - TRAIL_STOP_MULT * atr
+                if side == 'short' and fwd_row['low']  <= trail_trigger:
+                    trail_stop    = fwd_row['close'] + TRAIL_STOP_MULT * atr
 
-            if trail_stop:
-                if (side == 'long' and fwd_row['low'] <= trail_stop) or (side == 'short' and fwd_row['high'] >= trail_stop):
-                    exit_price = trail_stop
-                    exit_time = fwd_row.name
+            # 4) Check trailing stop
+            if trail_stop is not None:
+                if (side == 'long'  and fwd_row['low']  <= trail_stop) or \
+                   (side == 'short' and fwd_row['high'] >= trail_stop):
+                    exit_price   = trail_stop
+                    exit_time    = fwd_row.name
+                    exit_reason  = "TRAIL"
+                    used_trailing = True
                     break
+
+            # 5) Check session end
+            if not is_same_session(entry_time, fwd_row.name):
+                exit_price  = fwd_row['close']
+                exit_time   = fwd_row.name
+                exit_reason = "SESSION_END"
+                break
 
             fwd_idx += 1
 
+        # If loop ended without hitting any exit, force‐exit at last bar of df:
         if exit_price is None:
             fallback_row = labeled.iloc[-1]
-            exit_price = fallback_row['close']
-            exit_time = fallback_row.name
+            exit_price   = fallback_row['close']
+            exit_time    = fallback_row.name
+            exit_reason  = "SESSION_END"
 
-        if is_same_session and not is_same_session(entry_time, exit_time):
-            i += 1
-            continue
-
-        GROSS_PNL = (exit_price - entry_price) * TICK_VALUE * size if side == 'long' else (entry_price - exit_price) * TICK_VALUE * size
+        #  ──── Compute trade‐level PnL ────
+        GROSS_PNL  = (
+            (exit_price - entry_price) * TICK_VALUE * size
+            if side == 'long'
+            else (entry_price - exit_price) * TICK_VALUE * size
+        )
         COMMISSION = 3.98 * size
-        pnl = GROSS_PNL - COMMISSION
-        mfe = max_price - entry_price if side == 'long' else entry_price - min_price
-        mae = entry_price - min_price if side == 'long' else max_price - entry_price
+        pnl        = GROSS_PNL - COMMISSION
+
+        mfe = (max_price - entry_price) * 20 if side == 'long' else (entry_price - min_price) * 20
+        mae = (entry_price - min_price) * 20 if side == 'long' else (max_price - entry_price) * 20
 
         temp_trades_data.append({
-            'entry_time': entry_time,
-            'exit_time': exit_time,
-            'side': side,
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'pnl': pnl,
-            'mfe': mfe,
-            'mae': mae,
-            'gross_pnl': GROSS_PNL,
-            'vol_adj_pred': vol_adj_pred,
-            'confidence': conf,
-            'position_size': size,
+            'entry_time':     entry_time,
+            'exit_time':      exit_time,
+            'side':           side,
+            'entry_price':    entry_price,
+            'exit_price':     exit_price,
+            'pnl':            pnl,
+            'mfe':            mfe,
+            'mae':            mae,
+            'gross_pnl':      GROSS_PNL,
+            'vol_adj_pred':   vol_adj_pred,
+            'confidence':     conf,
+            'position_size':  size,
+            'exit_reason':    exit_reason,
+            'used_trailing':  used_trailing
         })
 
+        # Advance i until after this trade’s exit time
         while i < len(X_test_idx) and labeled.loc[X_test_idx[i]].name <= exit_time:
             i += 1
 
-    results = pd.DataFrame(temp_trades_data)
-    pnl_total = results['pnl'].sum() if not results.empty else 0
-    trades = len(results)
-    win_rate = (results['pnl'] > 0).mean() if not results.empty else 0
-    expectancy = results['pnl'].mean() if not results.empty else 0
-    profit_factor = results[results['pnl'] > 0]['pnl'].sum() / abs(results[results['pnl'] < 0]['pnl'].sum()) if not results.empty and (results['pnl'] < 0).any() else np.nan
-    sharpe = results['pnl'].mean() / (results['pnl'].std() + 1e-9) * np.sqrt(trades) if trades > 1 else 0
-    avg_confidence_win = abs(results[results['pnl'] > 0]['vol_adj_pred']).mean() if not results.empty else np.nan
+    # Compile stats
+    results     = pd.DataFrame(temp_trades_data)
+    pnl_total   = results['pnl'].sum() if not results.empty else 0
+    trades      = len(results)
+    win_rate    = (results['pnl'] > 0).mean() if not results.empty else 0
+    expectancy  = results['pnl'].mean() if not results.empty else 0
+    profit_factor = (
+        results[results['pnl'] > 0]['pnl'].sum()
+        / abs(results[results['pnl'] < 0]['pnl'].sum())
+        if (not results.empty) and (results['pnl'] < 0).any()
+        else np.nan
+    )
+    sharpe = (
+        (results['pnl'].mean() / (results['pnl'].std() + 1e-9)) * np.sqrt(trades)
+        if trades > 1 else 0
+    )
+    avg_confidence_win  = abs(results[results['pnl'] > 0]['vol_adj_pred']).mean() if not results.empty else np.nan
     avg_confidence_loss = abs(results[results['pnl'] <= 0]['vol_adj_pred']).mean() if not results.empty else np.nan
 
     return {
-        'pnl': pnl_total,
-        'trades': trades,
-        'win_rate': win_rate,
-        'expectancy': expectancy,
-        'profit_factor': profit_factor,
-        'sharpe': sharpe,
-        'long_trades': long_trades,
-        'short_trades': short_trades,
-        'avoid_hits': dict(avoid_hits),
-        'threshold': long_thresh,
-        'results': results,
-        'avg_confidence_win': avg_confidence_win,
-        'avg_confidence_loss': avg_confidence_loss
+        'pnl':                  pnl_total,
+        'trades':               trades,
+        'win_rate':             win_rate,
+        'expectancy':           expectancy,
+        'profit_factor':        profit_factor,
+        'sharpe':               sharpe,
+        'long_trades':          long_trades,
+        'short_trades':         short_trades,
+        'avoid_hits':           dict(avoid_hits),
+        'threshold':            long_thresh,
+        'results':              results,
+        'avg_confidence_win':   avg_confidence_win,
+        'avg_confidence_loss':  avg_confidence_loss
     }
-
 
 def evaluate_classification(
     X_test, preds_stack, preds_xgboost, labeled, df,
