@@ -135,92 +135,140 @@ def evaluate_regression(
             i += 1
             continue
 
-        # Compute actual SL/TP distances in price‐units:
+        # ──── Compute actual SL/TP distances in price‐units ────
         sl_move = sl_mult * atr
         tp_move = tp_mult * atr
 
         # enforce a minimum TP of 0.5% of entry_price
-        min_tp = 0.005 * entry_price      
+        min_tp = 0.005 * entry_price
         tp_move = np.clip(tp_move, min_tp, tp_move)
 
+        # if your SL distance is bigger than TP, shrink SL to TP
         if sl_move > tp_move:
             sl_move = tp_move
 
         tp_price = entry_price + tp_move if side == 'long' else entry_price - tp_move
         sl_price = entry_price - sl_move  if side == 'long' else entry_price + sl_move
 
-        # ──── TRAILING LOGIC: ────
-        trail_trigger = (
-            entry_price + TRAIL_START_MULT * atr
-            if side == 'long'
-            else entry_price - TRAIL_START_MULT * atr
-        )
-        trail_stop    = None
-        used_trailing = False
+        # ──── TWO‐PHASE TRAILING STOP SETUP ────
+        trailing_activated = False
+        trail_stop         = None
 
-        max_price  = entry_price
-        min_price  = entry_price
+        # “activation price” = entry_price ± (TRAIL_START_MULT * ATR)
+        # later, once activated, we’ll ratchet behind the new highs/lows
+        if TRAIL_START_MULT > 0 and TRAIL_STOP_MULT > 0:
+            if side == 'long':
+                trail_trigger_price = entry_price + TRAIL_START_MULT * atr
+            else:  # side == 'short'
+                trail_trigger_price = entry_price - TRAIL_START_MULT * atr
+        else:
+            trail_trigger_price = None  # means “never activate” if either multiplier is zero
+
+        max_price = entry_price
+        min_price = entry_price
         exit_price = None
         exit_time  = None
-        exit_reason = None
 
-        # Iterate forward until SL, TP, trailing, or session‐end
         fwd_idx = labeled.index.get_loc(entry_row.name) + 1
         while fwd_idx < len(df):
             fwd_row = labeled.iloc[fwd_idx]
-            max_price = max(max_price, fwd_row['high'])
-            min_price = min(min_price, fwd_row['low'])
+            high_j  = fwd_row["high"]
+            low_j   = fwd_row["low"]
+            close_j = fwd_row["close"]
 
-            # 1) Check SL first
-            if (side == 'long'  and fwd_row['low']  <= sl_price)  or \
-               (side == 'short' and fwd_row['high'] >= sl_price):
+            # track the highest/lowest price seen so far during this trade
+            if high_j > max_price:
+                max_price = high_j
+            if low_j < min_price:
+                min_price = low_j
+
+            # ──── 1) Check SL first ────
+            if side == 'long' and low_j <= sl_price:
                 exit_price  = sl_price
                 exit_time   = fwd_row.name
-                exit_reason = "SL"
+                exit_reason = 'SL'
+                used_trailing = False
+                break
+            if side == 'short' and high_j >= sl_price:
+                exit_price  = sl_price
+                exit_time   = fwd_row.name
+                exit_reason = 'SL'
+                used_trailing = False
                 break
 
-            # 2) Check TP second
-            if (side == 'long'  and fwd_row['high'] >= tp_price)  or \
-               (side == 'short' and fwd_row['low']  <= tp_price):
+            # ──── 2) Check TP second ────
+            if side == 'long' and high_j >= tp_price:
                 exit_price  = tp_price
                 exit_time   = fwd_row.name
-                exit_reason = "TP"
+                exit_reason = 'TP'
+                used_trailing = False
+                break
+            if side == 'short' and low_j <= tp_price:
+                exit_price  = tp_price
+                exit_time   = fwd_row.name
+                exit_reason = 'TP'
+                used_trailing = False
                 break
 
-            # 3) Update trailing stop if trigger hit
-            if (TRAIL_START_MULT > 0) and (TRAIL_STOP_MULT > 0):
-                if side == 'long' and fwd_row['high'] >= trail_trigger:
-                    trail_stop    = fwd_row['close'] - TRAIL_STOP_MULT * atr
-                if side == 'short' and fwd_row['low']  <= trail_trigger:
-                    trail_stop    = fwd_row['close'] + TRAIL_STOP_MULT * atr
+            # ──── 3) TRAILING STOP LOGIC ────
+            if trail_trigger_price is not None:
+                if not trailing_activated:
+                    # not yet activated—wait for price to cross trail_trigger_price
+                    if side == 'long' and high_j >= trail_trigger_price:
+                        # first activation: move stop all the way up to breakeven
+                        trail_stop = entry_price
+                        trailing_activated = True
+                    elif side == 'short' and low_j <= trail_trigger_price:
+                        trail_stop = entry_price
+                        trailing_activated = True
+                else:
+                    # already activated—ratchet trailing stop behind the new high/low
+                    if side == 'long':
+                        new_trail = max_price - TRAIL_STOP_MULT * atr
+                        # do not move the stop below breakeven; only ratchet up
+                        if new_trail > trail_stop:
+                            trail_stop = new_trail
+                    else:  # short
+                        new_trail = min_price + TRAIL_STOP_MULT * atr
+                        if new_trail < trail_stop:
+                            trail_stop = new_trail
 
-            # 4) Check trailing stop
-            if trail_stop is not None:
-                if (side == 'long'  and fwd_row['low']  <= trail_stop) or \
-                   (side == 'short' and fwd_row['high'] >= trail_stop):
-                    exit_price   = trail_stop
-                    exit_time    = fwd_row.name
-                    exit_reason  = "TRAIL"
-                    used_trailing = True
-                    break
+                # now, if trailing_activated and price has hit the trail_stop, exit
+                if trailing_activated:
+                    if side == 'long' and low_j <= trail_stop:
+                        exit_price  = trail_stop
+                        exit_time   = fwd_row.name
+                        exit_reason = 'TRAIL'
+                        used_trailing = True
+                        break
+                    if side == 'short' and high_j >= trail_stop:
+                        exit_price  = trail_stop
+                        exit_time   = fwd_row.name
+                        exit_reason = 'TRAIL'
+                        used_trailing = True
+                        break
 
-            # 5) Check session end
+            # ──── 4) SESSION END ────
+            # If price never hit SL, TP, or TRAIL, but now we left the same session,
+            # force‐exit at this bar’s close:
             if not is_same_session(entry_time, fwd_row.name):
-                exit_price  = fwd_row['close']
-                exit_time   = fwd_row.name
-                exit_reason = "SESSION_END"
+                exit_price    = close_j
+                exit_time     = fwd_row.name
+                exit_reason   = 'SESSION_END'
+                used_trailing = trailing_activated  # could be True or False
                 break
 
             fwd_idx += 1
 
-        # If loop ended without hitting any exit, force‐exit at last bar of df:
+        # ──── 5) If we never hit any exit above, force‐exit at the very last bar ────
         if exit_price is None:
-            fallback_row = labeled.iloc[-1]
-            exit_price   = fallback_row['close']
-            exit_time    = fallback_row.name
-            exit_reason  = "SESSION_END"
+            fallback_row    = labeled.iloc[-1]
+            exit_price      = fallback_row['close']
+            exit_time       = fallback_row.name
+            exit_reason     = 'FORCED_END'
+            used_trailing   = trailing_activated
 
-        #  ──── Compute trade‐level PnL ────
+        # ──── 6) Compute PnL, MFE, MAE exactly as before ────
         GROSS_PNL  = (
             (exit_price - entry_price) * TICK_VALUE * size
             if side == 'long'
@@ -229,8 +277,8 @@ def evaluate_regression(
         COMMISSION = 3.98 * size
         pnl        = GROSS_PNL - COMMISSION
 
-        mfe = (max_price - entry_price) * 20 if side == 'long' else (entry_price - min_price) * 20
-        mae = (entry_price - min_price) * 20 if side == 'long' else (max_price - entry_price) * 20
+        mfe = (max_price - entry_price) * TICK_VALUE if side == 'long' else (entry_price - min_price) * TICK_VALUE
+        mae = (entry_price - min_price) * TICK_VALUE if side == 'long' else (max_price - entry_price) * TICK_VALUE
 
         temp_trades_data.append({
             'entry_time':     entry_time,
@@ -246,10 +294,10 @@ def evaluate_regression(
             'confidence':     conf,
             'position_size':  size,
             'exit_reason':    exit_reason,
-            'used_trailing':  used_trailing
+            'used_trailing':  used_trailing,
         })
 
-        # Advance i until after this trade’s exit time
+        # ──── 7) Advance `i` past this trade’s exit time ────
         while i < len(X_test_idx) and labeled.loc[X_test_idx[i]].name <= exit_time:
             i += 1
 
