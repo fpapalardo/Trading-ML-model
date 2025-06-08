@@ -83,7 +83,7 @@ def compute_classification_labels_triple_barrier_numba(
         pt_atr_mult, sl_atr_mult, vertical_barrier_periods, min_target_return_pct
     )
     return pd.Series(labels, index=df_prices.index, dtype=int).rename(
-        f'clf_target_numba_pt{pt_atr_mult}sl{sl_atr_mult}vb{vertical_barrier_periods}'
+        f'clf_target_numba_{vertical_barrier_periods}'
     )
 
 # def compute_regression_labels(
@@ -141,236 +141,66 @@ def compute_classification_labels_triple_barrier_numba(
 
 #     return normalized_returns.rename(f'reg_target_lookahead{lookahead}')
 
-def _compute_session_end_indices(
-    dts: np.ndarray, 
-    open_hour: int = 18, 
-    next_day_cutoff_min: int = 12 * 60
-) -> np.ndarray:
-    """
-    Precompute, for each bar index i, the integer index of the last bar
-    we should consider for the “session” that began at i+1.
-    If time ≥ 18:00 local, roll to next day’s first bar ≥ 12:00; 
-    otherwise use last bar of same day.
-    """
-    N = len(dts)
-    session_end = np.empty(N, dtype=np.int64)
-
-    # Extract date as YYYYMMDD int, and minutes since midnight:
-    dates   = np.empty(N, dtype=np.int32)
-    minutes = np.empty(N, dtype=np.int32)
-    for i in range(N):
-        ts = pd.Timestamp(dts[i])
-        dates[i]   = ts.year * 10000 + ts.month * 100 + ts.day
-        minutes[i] = ts.hour * 60 + ts.minute
-
-    # Map date → last index of that date
-    last_of_date = {}
-    for i in range(N):
-        last_of_date[dates[i]] = i
-
-    # Map date → all indices of that date (sorted by index)
-    idxs_by_date = {}
-    for i in range(N):
-        d = dates[i]
-        if d not in idxs_by_date:
-            idxs_by_date[d] = []
-        idxs_by_date[d].append(i)
-
-    for i in range(N):
-        d_i = dates[i]
-        m_i = minutes[i]
-
-        if m_i >= open_hour * 60:
-            # Build the “next day” key
-            y  = d_i // 10000
-            mo = (d_i // 100) % 100
-            da = d_i % 100
-            next_date = (pd.Timestamp(y, mo, da) + pd.Timedelta(days=1)).date()
-            next_key = next_date.year * 10000 + next_date.month * 100 + next_date.day
-
-            if next_key not in idxs_by_date:
-                # If next day not in data, fallback to last of current day
-                session_end[i] = last_of_date[d_i]
-            else:
-                # Among all bars on next day, pick the first one ≥ 12:00; else last of next day
-                cand_idxs = idxs_by_date[next_key]
-                chosen = cand_idxs[-1]  # default to last bar of next day
-                for c in cand_idxs:
-                    if minutes[c] >= next_day_cutoff_min:
-                        chosen = c
-                        break
-                session_end[i] = chosen
-        else:
-            # Same day → last bar of current day
-            session_end[i] = last_of_date[d_i]
-
-    return session_end
-
-
-@numba.jit(nopython=True)
-def _label_loop(
-    opens:      np.ndarray,
-    lows:       np.ndarray,
-    highs:      np.ndarray,
-    closes:     np.ndarray,
-    atrs:       np.ndarray,
-    adxs:       np.ndarray,
-    chops:      np.ndarray,
-    session_end_idx: np.ndarray,
-    N:          int,
-    # SL/TP multipliers
-    tp_trend:   float,
-    sl_trend:   float,
-    tp_chop:    float,
-    sl_chop:    float,
-    tp_def:     float,
-    sl_def:     float,
-    round_trip_cost: float
-):
-    """
-    Core Numba loop.  Returns two 1D arrays: out_value (net P/L %) 
-    and out_side (1 if long, –1 if short).  
-
-    Key point: `round_trip_cost` is the fixed \$3.98 per trade.  
-    Inside the loop, we convert it to a percentage of entry_price by dividing
-    by (entry_price * 20) because each 1‐point move on NQ = \$20.
-    """
-    out_value = np.full(N, np.nan, dtype=np.float64)
-    out_side  = np.zeros(N, dtype=np.int64)
-
-    for i in range(N - 1):
-        idx = i + 1
-        entry_price = opens[idx]
-        atr = atrs[idx]
-        if entry_price <= 0.0 or atr <= 0.0:
-            # skip invalid bars
-            continue
-
-        # 1) Choose regime at entry
-        adx_i  = adxs[idx]
-        chop_i = chops[idx]
-        if (adx_i > 25.0) and (chop_i < 50.0):
-            tp_m = tp_trend
-            sl_m = sl_trend
-        elif chop_i > 60.0:
-            tp_m = tp_chop
-            sl_m = sl_chop
-        else:
-            tp_m = tp_def
-            sl_m = sl_def
-
-        # 2) Compute SL/TP prices
-        sl_long  = entry_price - sl_m * atr
-        tp_long  = entry_price + tp_m * atr
-        sl_short = entry_price + sl_m * atr
-        tp_short = entry_price - tp_m * atr
-
-        end_idx = session_end_idx[i]
-
-        exit_long  = np.nan
-        exit_short = np.nan
-
-        # 3) Scan forward until session_end_idx
-        for j in range(idx + 1, end_idx + 1):
-            low_j  = lows[j]
-            high_j = highs[j]
-
-            if np.isnan(exit_long):
-                if low_j <= sl_long:
-                    exit_long = (sl_long - entry_price) / entry_price
-                elif high_j >= tp_long:
-                    exit_long = (tp_long - entry_price) / entry_price
-
-            if np.isnan(exit_short):
-                if high_j >= sl_short:
-                    exit_short = (entry_price - sl_short) / entry_price
-                elif low_j <= tp_short:
-                    exit_short = (entry_price - tp_short) / entry_price
-
-            if (not np.isnan(exit_long)) and (not np.isnan(exit_short)):
-                break
-
-        # 4) If no SL/TP was hit, use final bar’s close
-        if np.isnan(exit_long):
-            final_p = closes[end_idx]
-            exit_long = (final_p - entry_price) / entry_price
-
-        if np.isnan(exit_short):
-            final_p = closes[end_idx]
-            exit_short = (entry_price - final_p) / entry_price
-
-        # 5) Subtract fixed \$3.98 cost as a % of entry_price:
-        #       cost_pct = (3.98 dollars) ÷ (entry_price * $20/point)
-        cost_pct = round_trip_cost / (entry_price * 20.0)
-        exit_long  -= cost_pct
-        exit_short -= cost_pct
-
-        # 6) Pick whichever side gives the larger (net) P/L
-        if exit_long >= exit_short:
-            out_value[i] = exit_long
-            out_side[i]  = 1
-        else:
-            out_value[i] = exit_short
-            out_side[i]  = -1
-
-    return out_value, out_side
-
-
-def compute_dynamic_dual_labels_with_regime_and_cost_numba(
+def compute_regression_labels(
     df: pd.DataFrame,
-    atr_col: str     = "ATR_14_5min",
-    price_col: str   = "open",
-    adx_col: str     = "ADX_14_5min",
-    chop_col: str    = "CHOP_14_1_100_5min",
-    tp_atr_mult_trend: float   = 3.0,
-    sl_atr_mult_trend: float   = 1.0,
-    tp_atr_mult_chop: float    = 1.0,
-    sl_atr_mult_chop: float    = 0.5,
-    tp_atr_mult_default: float = 2.0,
-    sl_atr_mult_default: float = 1.0,
-    round_trip_cost: float     = 3.98,
-) -> pd.DataFrame:
+    lookahead: int = 12,
+    price_col_entry: str = "open",
+    price_col_exit: str = "close",
+    vol_col: str = "ATR_14_5min",
+    use_log_return: bool = True,
+    normalize_by_vol: bool = True,
+    min_vol_threshold: float = 1e-5,
+    same_day_only: bool = True,
+    transform_type: str = "none",  # options: "tanh", "none"
+    clip_outliers: bool = True,
+    clip_bounds: tuple = (-0.3, 0.3)
+) -> pd.Series:
     """
-    Main entrypoint.  Returns a DataFrame with two columns:
-      - 'reg_value' (net P/L % after cost)
-      - 'reg_side'  (1 if long > short, –1 otherwise)
+    Generate a regression target based on future return (log or %),
+    with optional volatility normalization, same-day filtering, and transformation.
     """
-    assert isinstance(df.index, pd.DatetimeIndex), "Index must be DatetimeIndex"
-    for col in ("low", "high", "close", price_col, atr_col, adx_col, chop_col):
-        if col not in df.columns:
-            raise ValueError(f"Missing column '{col}' in df")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("DataFrame must use a DatetimeIndex.")
 
-    N = len(df)
-    opens  = df[price_col].to_numpy(dtype=np.float64)
-    lows   = df["low"].to_numpy(dtype=np.float64)
-    highs  = df["high"].to_numpy(dtype=np.float64)
-    closes = df["close"].to_numpy(dtype=np.float64)
-    atrs   = df[atr_col].fillna(0.0).to_numpy(dtype=np.float64)
-    adxs   = df[adx_col].fillna(0.0).to_numpy(dtype=np.float64)
-    chops  = df[chop_col].fillna(0.0).to_numpy(dtype=np.float64)
+    df = df.copy()
+    entry = df[price_col_entry].shift(-1)
+    exit_ = df[price_col_exit].shift(-(1 + lookahead))
 
-    # 1) Precompute session_end_idx array
-    dts = df.index.values  # np.ndarray of dtype datetime64[ns]
-    session_end_idx = _compute_session_end_indices(dts)
+    # Filter invalid prices
+    valid = (entry > 0) & (exit_ > 0)
+    entry = entry[valid]
+    exit_ = exit_[valid]
 
-    # 2) Run the jitted loop
-    vals, sides = _label_loop(
-        opens, lows, highs, closes,
-        atrs, adxs, chops,
-        session_end_idx, N,
-        tp_atr_mult_trend, sl_atr_mult_trend,
-        tp_atr_mult_chop, sl_atr_mult_chop,
-        tp_atr_mult_default, sl_atr_mult_default,
-        round_trip_cost     # pass the raw \$3.98 here
-    )
+    # --- Return Calculation ---
+    if use_log_return:
+        returns = np.log(exit_ / entry)
+    else:
+        returns = (exit_ - entry) / entry
 
-    df_labels = pd.DataFrame({
-        "reg_value": vals,
-        "reg_side":  sides
-    }, index=df.index)
+    returns = returns.reindex(df.index)
 
-    return df_labels
+    # --- Volatility Normalization ---
+    if normalize_by_vol:
+        vol = df[vol_col].copy()
+        vol = pd.to_numeric(vol, errors="coerce").fillna(min_vol_threshold)
+        vol[vol < min_vol_threshold] = min_vol_threshold
+        returns = returns / vol
 
+    # --- Same-Day Filter ---
+    if same_day_only:
+        entry_day = pd.Series(df.index.date, index=df.index).shift(-1)
+        exit_day = pd.Series(df.index.date, index=df.index).shift(-(1 + lookahead))
+        returns[entry_day != exit_day] = np.nan
+
+    # --- Clipping ---
+    if clip_outliers:
+        returns = returns.clip(*clip_bounds)
+
+    # --- Transformation ---
+    if transform_type == "tanh":
+        returns = np.tanh(returns * 10)
+
+    return returns.rename(f"reg_target_lookahead{lookahead}")
 
 def label_and_save(
     df_input_features: pd.DataFrame, 
@@ -385,48 +215,25 @@ def label_and_save(
     print(f"\n--- Processing for output suffix: {output_file_suffix} ---")
     df_labeled = df_input_features.copy()
 
-    # 1) Regression targets: compute both value and side using the dynamic SL/TP logic
-    print("Adding Regression Targets...")
-    df_reg = compute_dynamic_dual_labels_with_regime_and_cost_numba(
-        df_input_features,
-        atr_col="ATR_14_5min",
-        price_col="open",
-        adx_col="ADX_14_5min",
-        chop_col="CHOP_14_1_100_5min",
-        tp_atr_mult_trend=3.0,
-        sl_atr_mult_trend=1.0,
-        tp_atr_mult_chop=1.0,
-        sl_atr_mult_chop=0.5,
-        tp_atr_mult_default=2.0,
-        sl_atr_mult_default=1.0,
-        round_trip_cost=3.98,
-    )
-    # df_reg contains columns ["reg_value", "reg_side"]
-    df_labeled["reg_value"] = df_reg["reg_value"]
-    df_labeled["reg_side"]  = df_reg["reg_side"]
+    reg_col = f'reg_target_lookahead{lookahead_period}'
+    print(f"Adding Regression Target: {reg_col} ...")
+    df_labeled[reg_col] = compute_regression_labels(df_labeled, lookahead=lookahead_period, vol_col=vol_col_name)
 
-    print(f"reg_value NaNs: {df_labeled['reg_value'].isna().sum()}")
-    print(f"reg_side  NaNs: {df_labeled['reg_side'].isna().sum()}")
+    print(f"{reg_col} NaNs: {df_labeled[reg_col].isna().sum()}")
 
-    # 2) Classification target (unmodified)
-    clf_col = f'clf_target_numba_pt{pt_multiplier}sl{sl_multiplier}vb{lookahead_period}'
+    clf_col = f'clf_target_numba_{lookahead_period}'
     print(f"\nAdding Classification Target: {clf_col} ...")
     df_labeled[clf_col] = compute_classification_labels_triple_barrier_numba(
-        df_labeled,
-        atr_col=vol_col_name,
-        pt_atr_mult=pt_multiplier,
-        sl_atr_mult=sl_multiplier,
-        vertical_barrier_periods=lookahead_period,
+        df_labeled, atr_col=vol_col_name, pt_atr_mult=pt_multiplier,
+        sl_atr_mult=sl_multiplier, vertical_barrier_periods=lookahead_period,
         min_target_return_pct=min_return_percentage
     )
+
     print(f"{clf_col} NaNs: {df_labeled[clf_col].isna().sum()}")
 
-    # 3) Drop any rows where regression or classification labels are NaN
-    required_cols = ["reg_value", "reg_side", clf_col]
-    df_final = df_labeled.dropna(subset=required_cols)
+    df_final = df_labeled.dropna(subset=[reg_col, clf_col])
     print(f"Rows after dropping NaNs from targets: {len(df_final)}")
 
-    # 4) Save to parquet if any rows remain
     if not df_final.empty:
         os.makedirs("parquet", exist_ok=True)
         output_filename = os.path.join("parquet", f"labeled_data_{output_file_suffix}.parquet")
