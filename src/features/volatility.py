@@ -1,10 +1,19 @@
 import pandas as pd
 import numpy as np
+import pandas_ta as ta
 
 # --- Volatility Indicators & Features ---
-def add_atr(df, length=14):
-    """Append ATR via pandas_ta."""
-    df.ta.atr(length=length, append=True)
+def add_atrs_all(
+    df: pd.DataFrame,
+    lengths: tuple[int, ...] = (3, 5, 7, 14)
+) -> pd.DataFrame:
+    """
+    Compute ATR for each period in `lengths` and append as ATR_<length>.
+    """
+    for length in lengths:
+        col = f"ATR_{length}"
+        # force pandas_ta to name it exactly ATR_<length>
+        df.ta.atr(length=length, append=True, col_names=(col,))
     return df
 
 def add_bollinger(df, length=20, std=2):

@@ -1,15 +1,30 @@
 import pandas as pd
 import numpy as np
+import pandas_ta as ta
 
 # --- Trend Indicators & Features ---
-def add_ema(df, length=20):
-    """Append EMA via pandas_ta."""
-    df.ta.ema(length=length, append=True)
+def add_emas_all(
+    df: pd.DataFrame,
+    lengths: tuple[int, ...] = (9, 20, 21, 50, 200)
+) -> pd.DataFrame:
+    """
+    Compute EMA for each period in `lengths` and append as EMA_<length>.
+    """
+    for length in lengths:
+        col = f"EMA_{length}"
+        df.ta.ema(length=length, append=True, col_names=(col,))
     return df
 
-def add_sma(df, length=20):
-    """Append SMA via pandas_ta."""
-    df.ta.sma(length=length, append=True)
+def add_smas_all(
+    df: pd.DataFrame,
+    lengths: tuple[int, ...] = (9, 20, 21, 50, 200)
+) -> pd.DataFrame:
+    """
+    Compute SMA for each period in `lengths` and append as SMA_<length>.
+    """
+    for length in lengths:
+        col = f"SMA_{length}"
+        df.ta.sma(length=length, append=True, col_names=(col,))
     return df
 
 def add_adx(df, length=14):

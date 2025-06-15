@@ -210,7 +210,8 @@ def label_and_save(
     sl_multiplier: float,
     min_return_percentage: float,
     output_file_suffix: str,
-    feature_columns_for_dropna: list
+    feature_columns_for_dropna: list,
+    market: str
 ):
     print(f"\n--- Processing for output suffix: {output_file_suffix} ---")
     df_labeled = df_input_features.copy()
@@ -235,8 +236,8 @@ def label_and_save(
     print(f"Rows after dropping NaNs from targets: {len(df_final)}")
 
     if not df_final.empty:
-        os.makedirs("parquet", exist_ok=True)
-        output_filename = os.path.join("parquet", f"labeled_data_{output_file_suffix}.parquet")
+        os.makedirs(f"../parquet/{market}", exist_ok=True)
+        output_filename = os.path.join(f"../parquet/{market}", f"labeled_data_{output_file_suffix}.parquet")
         df_final.to_parquet(output_filename)
         print(f"✅ Saved {output_filename} with {len(df_final)} rows")
     else:

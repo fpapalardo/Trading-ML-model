@@ -1,38 +1,67 @@
 import pandas as pd
 import numpy as np
+import pandas_ta as ta
 
 # --- Momentum Indicators & Signals ---
-def add_rsi(df, length=14):
-    """Append RSI to df using pandas_ta."""
-    df.ta.rsi(length=length, append=True)
+def add_rsi_all(
+    df: pd.DataFrame,
+    lengths: tuple[int,int] = (7, 14)
+) -> pd.DataFrame:
+    """
+    Compute RSI for each length in `lengths` (default 7 & 14)
+    and append columns RSI_<length>.
+    """
+    for length in lengths:
+        col = f"RSI_{length}"
+        df.ta.rsi(length=length, append=True, col_names=(col,))
     return df
 
-def add_rsi_signals(df, rsi_col='RSI_14', ob_level=70, os_level=30):
+def add_rsi_signals_all(
+    df: pd.DataFrame,
+    lengths: tuple[int,int] = (7, 14),
+    ob_level: int = 70,
+    os_level: int = 30
+) -> pd.DataFrame:
     """
-    Append overbought/oversold binary signals based on RSI.
+    For each RSI_<length> in `lengths`, append
+      RSI_<length>_OB (overbought), and
+      RSI_<length>_OS (oversold).
     """
-    if rsi_col in df.columns:
-        s = pd.to_numeric(df[rsi_col], errors='coerce')
-        df[f'{rsi_col}_OB'] = (s > ob_level).astype(int)
-        df[f'{rsi_col}_OS'] = (s < os_level).astype(int)
+    for length in lengths:
+        col = f"RSI_{length}"
+        if col in df.columns:
+            s = pd.to_numeric(df[col], errors='coerce')
+            df[f"{col}_OB"] = (s > ob_level).astype(int)
+            df[f"{col}_OS"] = (s < os_level).astype(int)
     return df
 
-def rsi_divergence_feature(df, rsi_col='RSI_14', lookback=5):
+def rsi_divergence_all(
+    df: pd.DataFrame,
+    lengths: tuple[int,int] = (7, 14),
+    lookback: int = 5
+) -> pd.DataFrame:
     """
-    Append RSI divergence signal: -1 bearish, +1 bullish, 0 none.
+    For each RSI_<length>, append RSI_<length>_div:
+      -1 = bearish divergence, +1 = bullish divergence, 0 = none
     """
-    price = df['close']
+    price = df["close"]
     ph = price.rolling(lookback).max().shift(1)
     pl = price.rolling(lookback).min().shift(1)
-    rh = df[rsi_col].rolling(lookback).max().shift(1)
-    rl = df[rsi_col].rolling(lookback).min().shift(1)
 
-    bear = (price >= ph) & (df[rsi_col] < rh)
-    bull = (price <= pl) & (df[rsi_col] > rl)
+    for length in lengths:
+        col = f"RSI_{length}"
+        div_col = f"{col}_div"
+        if col in df.columns:
+            rh = df[col].rolling(lookback).max().shift(1)
+            rl = df[col].rolling(lookback).min().shift(1)
 
-    df['RSI_div'] = 0
-    df.loc[bear, 'RSI_div'] = -1
-    df.loc[bull, 'RSI_div'] = 1
+            bear = (price >= ph) & (df[col] < rh)
+            bull = (price <= pl) & (df[col] > rl)
+
+            df[div_col] = 0
+            df.loc[bear, div_col] = -1
+            df.loc[bull, div_col] = 1
+
     return df
 
 def add_stochastic(df, k=14, d=3, smooth_k=3):
