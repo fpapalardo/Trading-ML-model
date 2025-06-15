@@ -2,6 +2,8 @@ import os
 import platform
 import pandas as pd
 import matplotlib.pyplot as plt
+from src.features.registry import FEATURE_FUNCTIONS, SESSION_FUNCS
+from src.features.composite  import add_selected_features
 
 def load_and_resample_data(
     market_hint,
@@ -82,78 +84,45 @@ def load_and_resample_data(
 
 def apply_feature_engineering(
     resampled: dict,
-    add_all_features,
-    add_time_session_features,
-    #add_trend_features,
-    timeframes: list = ['5min'],
-    base_tf: str = '5min'
-):
-    print("--- Starting Feature Engineering Execution ---")
+    timeframes: list      = None,
+    base_tf:     str       = None,
+    features:    list      = None
+) -> pd.DataFrame:
+    """
+    - resampled: dict[str→DataFrame] of raw bars per timeframe
+    - features:  list of keys from FEATURE_FUNCTIONS dict to apply
+    - base_tf:   which tf to use as the merge base
+    """
+    timeframes  = timeframes or list(resampled.keys())
+    base_tf      = base_tf     or timeframes[0]
+    features     = features    or list(FEATURE_FUNCTIONS.keys())
 
-    # --- Input Validations ---
-    if base_tf not in timeframes:
-        raise ValueError(f"Base timeframe '{base_tf}' must be included in the `timeframes` list.")
-
-    missing_tfs = [tf for tf in timeframes if tf not in resampled]
-    if missing_tfs:
-        raise ValueError(f"The following requested timeframes are missing from resampled data: {missing_tfs}")
-
-    if not callable(add_all_features):
-        raise NameError("Function 'add_all_features' must be provided.")
-    if not callable(add_time_session_features):
-        raise NameError("Function 'add_time_session_features' must be provided.")
-    # if not callable(add_trend_features):
-    #     raise NameError("Function 'add_trend_features' must be provided.")
-
-    expected_cols = ['open', 'high', 'low', 'close', 'volume']
-    for tf in timeframes:
-        df = resampled[tf]
-        if not all(col in df.columns for col in expected_cols):
-            raise ValueError(f"Timeframe '{tf}' missing required OHLCV columns.")
-
-    # --- Generate Features ---
+    # 1) for each timeframe, call composite.add_selected_features
     feature_dfs = {}
     for tf in timeframes:
+        df = resampled[tf].copy()
         suffix = f"_{tf}"
-        print(f"\nGenerating features for timeframe: {tf} — shape: {resampled[tf].shape}")
-        
-        # First add standard features
-        df_with_features = add_all_features(resampled[tf].copy(), suffix=suffix)
-        
-        # Then add trend features
-        # print(f"Adding trend features for timeframe: {tf}")
-        # df_with_features = add_trend_features(df_with_features, suffix=suffix)
-        
-        feature_dfs[tf] = df_with_features
-        print(f"Output shape for {tf}: {feature_dfs[tf].shape}")
+        # composite will look up each key in FEATURE_FUNCTIONS
+        df = add_selected_features(df, features=features, suffix=suffix)
+        feature_dfs[tf] = df
 
-    # --- Add Time/Session Features to Base Timeframe ---
-    print(f"\nAdding time/session features to base timeframe: {base_tf}")
-    df_base = add_time_session_features(feature_dfs[base_tf].copy())
+    # 2) session/time features on base tf
+    df_base = feature_dfs[base_tf].copy()
+    for fn in SESSION_FUNCTIONS.values():
+        df_base = fn(df_base)
 
-    # --- Merge All Other Timeframes ---
-    print("\nMerging additional timeframe features into base...")
+    # 3) merge all other‐tf suffix columns back into base
     df_merged = df_base.sort_index()
-
     for tf in timeframes:
         if tf == base_tf:
             continue
-
         suffix = f"_{tf}"
-        cols_to_merge = [col for col in feature_dfs[tf].columns if col.endswith(suffix)]
-        if not cols_to_merge:
-            print(f"⚠️ No columns with suffix {suffix} in {tf}; skipping merge.")
-            continue
-
-        df_to_merge = feature_dfs[tf][cols_to_merge].sort_index()
+        cols   = [c for c in feature_dfs[tf].columns if c.endswith(suffix)]
+        df_to  = feature_dfs[tf][cols].sort_index()
         df_merged = pd.merge_asof(
-            df_merged,
-            df_to_merge,
-            left_index=True,
-            right_index=True,
+            df_merged, df_to,
+            left_index=True, right_index=True,
             direction='backward'
         )
 
-    print("--- Feature Engineering Execution COMPLETE ---")
-    print(f"Final df_merged shape: {df_merged.shape}")
     return df_merged
