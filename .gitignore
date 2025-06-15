@@ -1,15 +1,90 @@
-*.parquet
-*.pkl
-*.csv
-*.db
-
-src/notebooks/catboost_info/
-
-live-trade/live_data/*.csv
-src/notebooks/*.json
-
+# --- System & Editor Files ---
 __pycache__/
 **/__pycache__/
-
+.DS_Store
 **/.DS_Store
-src/.DS_Store
+*.swp
+*.swo
+*.bak
+*.tmp
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.env
+*.log
+
+# --- Data Artifacts (Never version these) ---
+*.csv
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.h5
+*.db
+*.sqlite
+*.npy
+*.npz
+
+# --- Notebooks / Intermediate Artifacts ---
+notebooks/parquet/
+notebooks/pkl/
+notebooks/dbs/
+notebooks/logs/
+notebooks/*.csv
+notebooks/*.parquet
+notebooks/*.pkl
+notebooks/*.db
+notebooks/*.json
+notebooks/*.log
+
+.ipynb_checkpoints/
+
+# --- Output/Results ---
+outputs/
+outputs/*
+!outputs/README.md       # (optional) keep a readme to explain what's here
+
+live_data/
+live_data/*
+!live_data/README.md     # (optional)
+
+# --- Data Folder ---
+data/
+data/*
+!data/README.md          # (optional)
+!data/*.md
+!data/*.txt
+
+# --- Models ---
+models/
+models/*
+!models/README.md
+!models/**/metadata.json # If you want to version model metadata/config only
+
+# --- Tests ---
+tests/__pycache__/
+
+# --- Specific ignore by type anywhere ---
+**/*.csv
+**/*.parquet
+**/*.pkl
+**/*.db
+**/*.json
+**/*.h5
+**/*.feather
+
+# --- Ignore backups and temp files everywhere ---
+*~
+*.tmp
+*.bak
+
+# --- Secrets/Config ---
+.env
+.env.*
+*.secret
+*.key
+*.pem
+
+# --- Python env ---
+.venv/
+venv/

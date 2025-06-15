@@ -1,1 +1,21 @@
+# Ensure notebooks are always handled as text, not binary
 *.ipynb text eol=lf
+
+# Force Unix-style line endings for code files
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.csv text eol=lf
+*.yml text eol=lf
+
+# Mark binary/model/data artifacts as binary (no text diffs, even if they sneak in)
+*.pkl binary
+*.parquet binary
+*.db binary
+*.h5 binary
+*.npy binary
+*.npz binary
+*.feather binary
+
+# (Optional) Force utf-8 encoding for code files
+*.py text working-tree-encoding=UTF-8
