@@ -1,5 +1,7 @@
 import numpy as np
 import optuna
+
+from optimization.common import auto_ts_split, create_study, get_storage_uri, blend_scores
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils import compute_sample_weight, compute_class_weight
@@ -41,7 +43,7 @@ def tune_xgboost(
             'num_class': len(np.unique(y_train)),
             'eval_metric': 'logloss'
         }
-        tscv = TimeSeriesSplit(n_splits=splits)
+        tscv = auto_ts_split(len(y_train))
         cv_scores = []
         for tr_idx, val_idx in tscv.split(X_train):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
@@ -105,7 +107,7 @@ def tune_lgbm(
             'n_jobs': -1,
             'verbosity': -1
         }
-        tscv = TimeSeriesSplit(n_splits=splits)
+        tscv = auto_ts_split(len(y_train))
         cv_scores = []
         for tr_idx, val_idx in tscv.split(X_train):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
@@ -138,9 +140,7 @@ def tune_lgbm(
 def tune_rf(
     X_train, y_train,
     market: str,
-    splits: int = 4,
     n_trials: int = 50,
-    db_dir: str = "notebooks/dbs",
     unique_id: str = None
 ) -> dict:
     """
@@ -149,7 +149,6 @@ def tune_rf(
     study_name = f"rf_opt_class_{market}"
     if unique_id:
         study_name += f"_{unique_id}"
-    storage = f"sqlite:///{db_dir}/{study_name}.db"
 
     def objective(trial):
         params = {
@@ -164,7 +163,7 @@ def tune_rf(
             'class_weight': trial.suggest_categorical('class_weight', [None, 'balanced']),
             'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy'])
         }
-        tscv = TimeSeriesSplit(n_splits=splits)
+        tscv = auto_ts_split(len(y_train))
         model = RandomForestClassifier(**params, random_state=42, n_jobs=-1)
         cv_scores = cross_val_score(
             model, X_train, y_train,
@@ -177,13 +176,9 @@ def tune_rf(
         trial.set_user_attr('oob_score', oob)
         return score
 
-    study = optuna.create_study(
-        direction='maximize',
+    study = create_study(
         study_name=study_name,
-        sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
-        storage=storage,
-        load_if_exists=True
+        direction="maximize"
     )
     study.optimize(objective, n_trials=n_trials)
     return study.best_params
@@ -223,7 +218,7 @@ def tune_catboost(
         }
         if bootstrap == 'Bayesian':
             params['bagging_temperature'] = trial.suggest_float('bagging_temperature', 0.0, 1.0)
-        tscv = TimeSeriesSplit(n_splits=splits)
+        tscv = auto_ts_split(len(y_train))
         cv_scores = []
         for tr_idx, val_idx in tscv.split(X_train):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
@@ -277,7 +272,7 @@ def tune_logistic_regression(
             'max_iter': 1000,
             'multi_class': 'auto'
         }
-        tscv = TimeSeriesSplit(n_splits=splits)
+        tscv = auto_ts_split(len(y_train))
         cv_scores = []
         for tr_idx, val_idx in tscv.split(X_train):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]

@@ -20,7 +20,7 @@ from .trend         import (
 from .volume        import (
     add_obv, volume_spike, donchian_dist,
     volume_delta_features, volume_zscore_features,
-    add_volume_features,
+    add_volume_features, add_volume_trend
 )
 from .volume_stats  import (
     add_volume_delta_rollsum, add_cvd, add_wick_percent, add_rel_volume,
@@ -30,6 +30,7 @@ from .price_action  import (
     prev_swing_high_low, dist_to_closest_sr,
     candlestick_patterns, stop_hunt, fvg,
     day_high_low_open, prev_high_low, price_vs_open,
+    add_prev_swing_dist
 )
 from .session       import time_session_features, session_id, session_range
 
@@ -78,6 +79,7 @@ FEATURE_FUNCTIONS = {
     'volume_delta':     volume_delta_features,
     'volume_zscore':    volume_zscore_features,
     'volume_features':  add_volume_features,
+    'volume_trend':     add_volume_trend,
 
     # Volume Stats
     'vol_delta_rollsum': add_volume_delta_rollsum,
@@ -96,6 +98,7 @@ FEATURE_FUNCTIONS = {
     'day_high_low':     day_high_low_open,
     'prev_high_low':    prev_high_low,
     'price_vs_open':    price_vs_open,
+    'prev_swing_dist':  add_prev_swing_dist,
 }
 
 # ── Session / Time Functions ───────────────────────────────────────────

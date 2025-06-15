@@ -3,9 +3,10 @@ import os
 from pathlib import Path
 import optuna
 from sklearn.model_selection import TimeSeriesSplit
+from config import ROOT, DB_DIR, RAW_DIR
 
 # —— Default configuration ——
-DEFAULT_DB_DIR = Path("notebooks/dbs")
+DEFAULT_DB_DIR = DB_DIR
 DEFAULT_SEED = 42
 PRUNER_STARTUP_TRIALS = 5
 CV_TRAIN_BLEND = (0.8, 0.2)  # (CV score weight, train score weight)
@@ -74,6 +75,8 @@ def auto_ts_split(
         # n_splits+1 folds => approximate test_size = n_samples/(n_splits+1)
         possible = max(2, n_samples // min_test_size - 1)
         n_splits = min(possible, max_splits)
+
+    print(f"{n_splits} splits are possible to use for optimization.\n")
     return TimeSeriesSplit(n_splits=n_splits)
 
 

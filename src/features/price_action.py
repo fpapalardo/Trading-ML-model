@@ -29,6 +29,42 @@ def dist_to_closest_sr(df):
     df['Dist_SR']   = df[['Dist_High','Dist_Low']].min(axis=1)
     return df
 
+import pandas as pd
+
+def add_prev_swing_dist(
+    df: pd.DataFrame,
+    window: int = 12,
+    atr_col: str = "ATR_14"
+) -> pd.DataFrame:
+    """
+    Ensure Prev_Swing_Dist exists:
+      - Prev_Sw_High / Prev_Sw_Low by rolling window if missing
+      - Prev_Swing_Dist = (close - midpoint) / ATR_14 (or raw if no ATR_14)
+    """
+    df = df.copy()
+
+    # 1) If they've already got it, nothing to do
+    if "Prev_Swing_Dist" in df.columns:
+        return df
+
+    # 2) Ensure Prev_Sw_High & Prev_Sw_Low
+    if "Prev_Sw_High" not in df.columns or "Prev_Sw_Low" not in df.columns:
+        # rolling max/min then shift
+        df["Prev_Sw_High"] = df["high"].rolling(window=window).max().shift(1)
+        df["Prev_Sw_Low"]  = df["low"].rolling(window=window).min().shift(1)
+
+    # 3) midpoint between last swing high & low
+    swing_mid = 0.5 * (df["Prev_Sw_High"] + df["Prev_Sw_Low"])
+
+    # 4) normalized by ATR if available
+    if atr_col in df.columns:
+        df["Prev_Swing_Dist"] = (df["close"] - swing_mid) / df[atr_col]
+    else:
+        df["Prev_Swing_Dist"] = df["close"] - swing_mid
+
+    return df
+
+
 def candlestick_patterns(df):
     df['Bull_Engulf'] = ((df['close']>df['open'])&(df['open']<df['close'].shift(1))&(df['close']>df['open'].shift(1))).astype(int)
     df['Bear_Engulf'] = ((df['close']<df['open'])&(df['open']>df['close'].shift(1))&(df['close']<df['open'].shift(1))).astype(int)

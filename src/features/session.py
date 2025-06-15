@@ -28,6 +28,7 @@ def time_session_features(df):
     """Append cyclical time and session flags."""
     hr, mn, dw = df.index.hour, df.index.minute, df.index.dayofweek
     tod = hr+mn/60
+    df['Day_of_Week'] = df.index.dayofweek
     df['Time_Sin']=np.sin(2*np.pi*tod/24)
     df['Time_Cos']=np.cos(2*np.pi*tod/24)
     df['Day_Sin']=np.sin(2*np.pi*dw/7)
