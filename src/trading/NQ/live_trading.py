@@ -11,6 +11,7 @@ import requests
 
 from indicator_calculation import compute_all_indicators, session_times
 from projectx_connector import ProjectXClient
+from config import DATA_DIR
 
 # ── Configuration ─────────────────────────────────────────
 API_USERNAME   = "pelt8885"
@@ -18,7 +19,7 @@ API_KEY        = "IPgPJSFNYyUJp0LwtiqOAUkXfqsdWkA/v1GXll1Hjjs="
 CONTRACT_SEARCH = "NQ"
 CONTRACT_ID     = None  # will be discovered
 
-BAR_FILE  = "./live_data/bar_data.csv"
+BAR_FILE  = f"{DATA_DIR}/live/NQ/bar_data.csv"
 LOOKBACK  = 1000       # Initial bar load
 POLL_SEC   = 30        # Poll interval in seconds
 
@@ -73,6 +74,22 @@ def last_closed_5min_bar_ny(dt=None):
     else:
         bar -= timedelta(minutes=0)
     return bar
+
+def next_5min_boundary(dt: datetime) -> datetime:
+    """
+    Given a tz-aware datetime `dt`, return the next datetime
+    whose minute % 5 == 0, second == 0, microsecond == 0.
+    """
+    # how many minutes past the last 5-min mark?
+    over = dt.minute % 5
+    # minutes to add to hit the next multiple of 5
+    to_add = (5 - over) if over != 0 else 5
+    # zero out seconds/microseconds and add
+    next_bar = (dt
+        .replace(second=0, microsecond=0)
+        + timedelta(minutes=to_add)
+    )
+    return next_bar
 
 def seed_bars() -> pd.DataFrame:
     # Use the last closed 5-min NY bar as endpoint
@@ -164,22 +181,12 @@ def prepare_features(df5: pd.DataFrame,
         left_index=True, right_index=True, direction='backward'
     )
     df.ffill(inplace=True)
-    df.to_parquet("live.parquet")
     return df.tail(1)
 
 in_trade = False
 
 def act_on_signal(df: pd.DataFrame):
     global in_trade
-
-    print("="*60)
-    print("[act_on_signal] df.shape:", df.shape)
-    print("[act_on_signal] df.columns:", list(df.columns))
-    print("[act_on_signal] df.head():\n", df.head())
-    print("[act_on_signal] df.index type:", type(df.index))
-    print("[act_on_signal] df.index.tz:", getattr(df.index, 'tz', None))
-    print("="*60)
-
     if in_trade:
         print("[act_on_signal] In trade, skipping signal logic.")
         return
@@ -257,12 +264,12 @@ while True:
     try:
         now_ny = datetime.now(NY_TZ)
         last_bar_ny = last_closed_5min_bar_ny(now_ny)
-        next_bar_ny = last_bar_ny + timedelta(minutes=5)
+        next_bar_ny = next_5min_boundary(now_ny)
         sleep_secs = (next_bar_ny - now_ny).total_seconds()
         if sleep_secs <= 0:
             sleep_secs = 1
 
-        print(f"[{now_ny.strftime('%Y-%m-%d %H:%M:%S')}] Sleeping until next 5-min close (~{int(sleep_secs)}s)")
+        print(f"[{now_ny:%H:%M:%S}] Sleeping {sleep_secs:.2f}s until {next_bar_ny:%H:%M:%S}")
         time.sleep(sleep_secs)
 
         # After sleep, get last closed bar in NY time
@@ -291,7 +298,6 @@ while True:
                     BAR_FILE, mode='a', header=False, index=False
                 )
                 df_window = df_window.tail(LOOKBACK)
-                print(f"Running trading logic for {dt}")
                 act_on_signal(df_window)
     except Exception:
         print(f"[{datetime.now(timezone.utc)}] Exception:")
