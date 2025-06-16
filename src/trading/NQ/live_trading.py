@@ -8,6 +8,7 @@ import joblib
 import pandas as pd
 import numpy as np
 import requests
+from requests.exceptions import ReadTimeout, ConnectionError, HTTPError, SSLError
 
 from indicator_calculation import compute_all_indicators, session_times
 from projectx_connector import ProjectXClient
@@ -15,12 +16,12 @@ from config import DATA_DIR
 
 # ── Configuration ─────────────────────────────────────────
 API_USERNAME   = "pelt8885"
-API_KEY        = "IPgPJSFNYyUJp0LwtiqOAUkXfqsdWkA/v1GXll1Hjjs="
+API_KEY        = "xWUcuDCNW8EF6Qs/ccuqqJbaO91n/rBqpEX/CLiZUHs="
 CONTRACT_SEARCH = "NQ"
 CONTRACT_ID     = None  # will be discovered
 
 BAR_FILE  = f"{DATA_DIR}/live/NQ/bar_data.csv"
-LOOKBACK  = 1000       # Initial bar load
+LOOKBACK  = 350       # Initial bar load
 POLL_SEC   = 30        # Poll interval in seconds
 
 tp_atr_mult = 2.0
@@ -51,29 +52,115 @@ if CONTRACT_ID is None:
 open_orders = px.search_open_orders()
 in_trade = len(open_orders) > 0
 
-def retry_api_call(func, max_tries=5, initial_delay=1, exceptions=(requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError)):
+last_15m, last_1h = None, None
+cache_15m, cache_1h = None, None
+in_trade = False
+
+def retry_api_call(func, max_tries=5, initial_delay=1):
+    """Retry wrapper with exponential backoff and handling of rate limits."""
     delay = initial_delay
-    for attempt in range(max_tries):
+    for attempt in range(1, max_tries + 1):
         try:
             return func()
-        except exceptions as e:
-            print(f"[WARN] API call failed ({e.__class__.__name__}): {e}. Retrying in {delay}s...")
-            time.sleep(delay)
-            delay = min(delay * 2, 30)  # exponential backoff
-    print(f"[ERROR] API call failed after {max_tries} attempts. Raising exception.")
-    raise
+        except HTTPError as e:
+            code = e.response.status_code if e.response is not None else None
+            if code == 429:
+                retry_after = e.response.headers.get('Retry-After')
+                sleep_for = int(retry_after) if retry_after and retry_after.isdigit() else delay
+                print(f"[WARN] Rate limited (429). Sleeping {sleep_for}s...")
+                time.sleep(sleep_for)
+                delay = min(delay * 2, 300)
+                continue
+            print(f"[WARN] HTTP {code} error: {e}. Retrying in {delay}s...")
+        except (ReadTimeout, ConnectionError, SSLError) as e:
+            print(f"[WARN] Network error ({type(e).__name__}): {e}. Retrying in {delay}s...")
+        except Exception as e:
+            print(f"[WARN] Unexpected error ({type(e).__name__}): {e}. Retrying in {delay}s...")
+        time.sleep(delay)
+        delay = min(delay * 2, 300)
+    raise RuntimeError(f"API call failed after {max_tries} attempts.")
 
 def last_closed_5min_bar_ny(dt=None):
-    "Return the datetime of the last closed 5-min bar (NY time)."
     dt = dt or datetime.now(NY_TZ)
     dt = dt.astimezone(NY_TZ)
     minute = (dt.minute // 5) * 5
     bar = dt.replace(minute=minute, second=0, microsecond=0)
     if bar >= dt:
         bar -= timedelta(minutes=5)
-    else:
-        bar -= timedelta(minutes=0)
     return bar
+
+def retry_api_call(func, max_tries=5, initial_delay=1):
+    """Retry wrapper for API calls, with exponential backoff and rate-limit handling."""
+    delay = initial_delay
+    for attempt in range(1, max_tries + 1):
+        try:
+            return func()
+        except HTTPError as e:
+            code = e.response.status_code if e.response is not None else None
+            if code == 429:
+                print(f"[WARN] Rate limited (HTTP 429). Backing off for {delay}s...")
+            else:
+                print(f"[WARN] HTTP error {code}: {e}. Retrying in {delay}s...")
+        except (ReadTimeout, ConnectionError, SSLError) as e:
+            print(f"[WARN] Network error ({type(e).__name__}): {e}. Retrying in {delay}s...")
+        except Exception as e:
+            print(f"[WARN] Unexpected error ({type(e).__name__}): {e}. Retrying in {delay}s...")
+        time.sleep(delay)
+        delay = min(delay * 2, 60)
+    raise RuntimeError(f"API call failed after {max_tries} attempts.")
+
+def load_bars() -> pd.DataFrame:
+    # Full seed if no file or empty
+    if not os.path.exists(BAR_FILE) or os.stat(BAR_FILE).st_size == 0:
+        return seed_bars()
+    # Try loading CSV
+    try:
+        df = pd.read_csv(
+            BAR_FILE,
+            parse_dates=['datetime'],
+            index_col='datetime'
+        )
+    except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+        print(f"[WARN] CSV load error ({e}); seeding full history")
+        return seed_bars()
+    # Normalize timezone
+    if df.index.tz is None:
+        df.index = df.index.tz_localize(NY_TZ)
+    else:
+        df.index = df.index.tz_convert(NY_TZ)
+    # If empty after load, seed
+    if df.empty:
+        print("[WARN] Loaded CSV empty; seeding full history")
+        return seed_bars()
+    # Keep only last LOOKBACK bars
+    df = df.tail(LOOKBACK)
+    # Fetch any missing bars
+    last_ts = df.index.max()
+    end_ny = last_closed_5min_bar_ny()
+    if last_ts < end_ny:
+        start_utc = last_ts.astimezone(timezone.utc)
+        end_utc   = end_ny.astimezone(timezone.utc)
+        bars = retry_api_call(lambda: px.get_bars(
+            CONTRACT_ID,
+            start_utc,
+            end_utc,
+            unit=2, unit_number=5,
+            limit=int((end_ny - last_ts).total_seconds() // 300)
+        ))
+        if bars:
+            new_df = pd.DataFrame(bars)
+            new_df['t'] = pd.to_datetime(new_df['t'], utc=True).dt.tz_convert(NY_TZ)
+            new_df.rename(columns={
+                't':'datetime','o':'open','h':'high',
+                'l':'low','c':'close','v':'volume'
+            }, inplace=True)
+            new_df.set_index('datetime', inplace=True)
+            new_df.sort_index(inplace=True)
+            new_df = new_df[new_df.index > last_ts]
+            if not new_df.empty:
+                df = pd.concat([df, new_df]).tail(LOOKBACK)
+                new_df.to_csv(BAR_FILE, mode='a', header=False)
+    return df
 
 def next_5min_boundary(dt: datetime) -> datetime:
     """
@@ -92,66 +179,28 @@ def next_5min_boundary(dt: datetime) -> datetime:
     return next_bar
 
 def seed_bars() -> pd.DataFrame:
-    # Use the last closed 5-min NY bar as endpoint
     end_ny = last_closed_5min_bar_ny()
     start_ny = end_ny - timedelta(minutes=LOOKBACK * 5 - 5)
-
-    # Retry get_bars on SSL or timeout errors
-    backoff = 1
-    while True:
-        try:
-            bars = retry_api_call(lambda: px.get_bars(
-                CONTRACT_ID,
-                start_ny,
-                end_ny,
-                unit=2, unit_number=5, limit=LOOKBACK
-            ))
-            break
-        except (requests.exceptions.ReadTimeout, requests.exceptions.SSLError) as e:
-            print(f"[seed_bars] Error {e.__class__.__name__}: {e}, retrying in {backoff}s...")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+    bars = retry_api_call(lambda: px.get_bars(
+        CONTRACT_ID,
+        start_ny.astimezone(timezone.utc),
+        end_ny.astimezone(timezone.utc),
+        unit=2, unit_number=5,
+        limit=LOOKBACK
+    ))
     df = pd.DataFrame(bars)
-    df['t'] = pd.to_datetime(df['t']).dt.tz_convert(NY_TZ)
-    df.rename(
-        columns={'t':'datetime','o':'open','h':'high','l':'low','c':'close','v':'volume'},
-        inplace=True
-    )
+    df['t'] = pd.to_datetime(df['t'], utc=True).dt.tz_convert(NY_TZ)
+    df.rename(columns={
+        't':'datetime','o':'open','h':'high',
+        'l':'low','c':'close','v':'volume'
+    }, inplace=True)
     df.set_index('datetime', inplace=True)
     df.sort_index(inplace=True)
     df.to_csv(BAR_FILE)
     return df
 
-if not os.path.exists(BAR_FILE) or os.stat(BAR_FILE).st_size == 0:
-    df_window = seed_bars()
-else:
-    try:
-        df_window = pd.read_csv(
-            BAR_FILE,
-            parse_dates=['datetime'],
-            index_col='datetime'
-        )
-
-        # Handle timezones safely:
-        if not isinstance(df_window.index, pd.DatetimeIndex):
-            df_window.index = pd.to_datetime(df_window.index)
-
-        if df_window.index.tz is None:
-            df_window.index = df_window.index.tz_localize("America/New_York")
-        else:
-            # Only convert if not already NY (safe for repeat runs)
-            if str(df_window.index.tz) != "America/New_York":
-                df_window.index = df_window.index.tz_convert("America/New_York")
-
-    except pd.errors.EmptyDataError:
-        df_window = seed_bars()
-    df_window = df_window.tail(LOOKBACK)
-
 def is_new_bar(now: datetime, last: datetime, mins: int) -> bool:
     return last is None or (now - last).total_seconds() >= mins * 60
-
-last_15m, last_1h = None, None
-cache_15m, cache_1h = None, None
 
 def prepare_features(df5: pd.DataFrame,
                      df15: pd.DataFrame,
@@ -182,8 +231,6 @@ def prepare_features(df5: pd.DataFrame,
     )
     df.ffill(inplace=True)
     return df.tail(1)
-
-in_trade = False
 
 def act_on_signal(df: pd.DataFrame):
     global in_trade
@@ -244,61 +291,53 @@ def act_on_signal(df: pd.DataFrame):
         print("No Trade prediction, waiting for next candle")
         return
 
-    side = 'Buy' if pred == 1 else 'Sell'
+    open_side = 'Buy' if pred == 1 else 'Sell'
+    exit_side = 'Sell' if open_side == 'Buy' else 'Buy'
+
+    print(f"Predicted {open_side}")
     price = ohlcv['close']
     tp_price = price + (tp_atr_mult * atr if pred == 1 else -tp_atr_mult * atr)
     sl_price = price - (sl_atr_mult * atr if pred == 1 else -sl_atr_mult * atr)
 
-    px.place_order(CONTRACT_ID, side, quantity=1)
+    px.place_order(CONTRACT_ID, open_side, quantity=1)
     result_oco = px.place_oco_exit(
         CONTRACT_ID,
         quantity=1,
         take_profit=tp_price,
-        stop_loss=sl_price
+        stop_loss=sl_price,
+        side=exit_side
     )
     in_trade = True
-    print(f"{now} {side}@{price:.2f}, TP={tp_price:.2f}, SL={sl_price:.2f}, OCO={result_oco}")
+    print(f"{now} {open_side}@{price:.2f}, TP={tp_price:.2f}, SL={sl_price:.2f}, OCO={result_oco}")
 
+try:
+    df_window = load_bars()
+except Exception as e:
+    print(f"[ERROR] Initial load_bars failed: {e}")
+    df_window = pd.DataFrame(columns=['open','high','low','close','volume'])
+
+prev_expected_ts = None
+# Main loop
 print("Starting live-trade loop...")
 while True:
     try:
-        now_ny = datetime.now(NY_TZ)
-        last_bar_ny = last_closed_5min_bar_ny(now_ny)
-        next_bar_ny = next_5min_boundary(now_ny)
-        sleep_secs = (next_bar_ny - now_ny).total_seconds()
-        if sleep_secs <= 0:
-            sleep_secs = 1
+        now_ny   = datetime.now(NY_TZ)
+        expected_bar = last_closed_5min_bar_ny(now_ny)
+        next_bar = next_5min_boundary(now_ny)
+        sleep_s  = max((next_bar - now_ny).total_seconds(), 1)
+        print(f"[{now_ny:%H:%M:%S}] Sleeping {sleep_s:.1f}s until {next_bar:%H:%M:%S}")
+        time.sleep(sleep_s)
+        # Reload bars (seed if needed)
+        df_window = load_bars()
 
-        print(f"[{now_ny:%H:%M:%S}] Sleeping {sleep_secs:.2f}s until {next_bar_ny:%H:%M:%S}")
-        time.sleep(sleep_secs)
+        # Only run if expected bar is present and not yet processed
+        if expected_bar in df_window.index and expected_bar != prev_expected_ts:
+            print(f"Expected bar detected: {expected_bar}. Running trading logic.")
+            act_on_signal(df_window)
+            prev_expected_ts = expected_bar
+        else:
+            print(f"Skipping: expected bar {expected_bar} not ready or already processed.")
 
-        # After sleep, get last closed bar in NY time
-        last_bar_ny = last_closed_5min_bar_ny()
-        last_bar_utc = last_bar_ny.astimezone(timezone.utc)
-        bars = retry_api_call(lambda: px.get_bars(
-            CONTRACT_ID,
-            last_bar_ny,
-            last_bar_ny,
-            unit=2, unit_number=5, limit=1
-        ))
-
-        if bars:
-            last = bars[-1]
-            dt = pd.to_datetime(last['t']).tz_convert(NY_TZ)
-            df_window.sort_index(inplace=True)
-            latest_ts = df_window.index.max() if not df_window.empty else None
-            if latest_ts is None or dt > latest_ts:
-                print(f"New bar detected at {dt}")
-                df_window.loc[dt] = [last['o'], last['h'], last['l'], last['c'], last['v']]
-                df_window.sort_index(inplace=True)
-                pd.DataFrame([{
-                    'datetime': dt, 'open': last['o'], 'high': last['h'],
-                    'low': last['l'], 'close': last['c'], 'volume': last['v']
-                }]).to_csv(
-                    BAR_FILE, mode='a', header=False, index=False
-                )
-                df_window = df_window.tail(LOOKBACK)
-                act_on_signal(df_window)
     except Exception:
         print(f"[{datetime.now(timezone.utc)}] Exception:")
         traceback.print_exc()
