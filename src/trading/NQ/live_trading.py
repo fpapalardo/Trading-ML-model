@@ -12,11 +12,9 @@ from requests.exceptions import ReadTimeout, ConnectionError, HTTPError, SSLErro
 
 from indicator_calculation import compute_all_indicators, session_times
 from projectx_connector import ProjectXClient
-from config import DATA_DIR
+from config import DATA_DIR, API_USERNAME, API_KEY
 
 # ── Configuration ─────────────────────────────────────────
-API_USERNAME   = "pelt8885"
-API_KEY        = "xWUcuDCNW8EF6Qs/ccuqqJbaO91n/rBqpEX/CLiZUHs="
 CONTRACT_SEARCH = "NQ"
 CONTRACT_ID     = None  # will be discovered
 
