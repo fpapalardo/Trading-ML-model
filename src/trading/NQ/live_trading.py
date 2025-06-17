@@ -1,342 +1,630 @@
+"""
+Live Trading System with Real-Time SignalR Market Data
+
+This module implements a live trading system that uses SignalR WebSockets
+for real-time market data instead of polling. It processes 5-minute bars
+as they complete and generates trading signals using a pre-trained model.
+
+Key Features:
+- Real-time bar processing via SignalR
+- Efficient indicator computation with caching
+- Thread-safe signal processing
+- Automatic order management
+- Trading hours enforcement
+
+Author: Trading Bot
+Date: 2024
+"""
+
 import os
 import time
 import traceback
+import threading
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import joblib
 import pandas as pd
 import numpy as np
-import requests
-from requests.exceptions import ReadTimeout, ConnectionError, HTTPError, SSLError
 
 from indicator_calculation import compute_all_indicators, session_times
 from projectx_connector import ProjectXClient
-from config import DATA_DIR, API_USERNAME, API_KEY
+from signalr_market_hub import TopStepMarketDataManager
+from config import DATA_DIR, FUTURES
 
-# ── Configuration ─────────────────────────────────────────
-CONTRACT_SEARCH = "NQ"
-CONTRACT_ID     = None  # will be discovered
 
-BAR_FILE  = f"{DATA_DIR}/live/NQ/bar_data.csv"
-LOOKBACK  = 350       # Initial bar load
-POLL_SEC   = 30        # Poll interval in seconds
+# ═══════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════
 
-tp_atr_mult = 2.0
-sl_atr_mult = 1.5
+# Contract Settings
+CONTRACT_SEARCH = "MNQ"  # Search term for finding contract
+CONTRACT_ID = None  # Numeric ID for REST API (populated at runtime)
+CONTRACT_SYMBOL = None  # String ID for SignalR (e.g., 'CON.F.US.NQ.H25')
 
+# Data Settings
+BAR_FILE = f"{DATA_DIR}/live/NQ/bar_data.csv"
+LOOKBACK = 350  # Number of historical bars to maintain
+
+# Trading Parameters
+TP_ATR_MULTIPLIER = 2.0  # Take profit ATR multiplier
+SL_ATR_MULTIPLIER = 1.5  # Stop loss ATR multiplier
+TICK_SIZE = 0.25  # Minimum price increment
+
+# Model Settings
 MODEL_FILE = "rf_model_classifier_LOOKAHEAD_6_session_less.pkl"
 FEATURE_COLUMNS = [
-    'POC_Dist_Current_Points_1h', 'POC_Dist_Current_Points_5min', 'Day_of_Week',
-    'POC_Dist_Current_Points_15min', 'Day_Sin', 'RSI_7_5min', 'Minus_DI_14_1h',
-    'Trend_Score_15min', 'Trend_Strength_5min', 'Prev_Swing_Dist_15min',
-    'Time_Sin', 'Volume_Trend_15min', 'Is_Trending_5min', 'Is_Trending_15min'
+    'POC_Dist_Current_Points_1h', 'POC_Dist_Current_Points_5min', 'Day_of_Week', 
+    'POC_Dist_Current_Points_15min', 'Day_Sin', 'RSI_7_5min', 'Minus_DI_14_1h', 
+    'Trend_Score_15min', 'Trend_Strength_5min', 'Prev_Swing_Dist_15min', 'Time_Sin', 
+    'Volume_Trend_15min', 'Is_Trending_5min', 'Is_Trending_15min'
 ]
 
 # Timezone
 NY_TZ = ZoneInfo("America/New_York")
 
-model = joblib.load(MODEL_FILE)
 
-px = ProjectXClient(API_USERNAME, API_KEY)
-px.authenticate()
+# ═══════════════════════════════════════════════════════════════════════════
+# TRADING STATE MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
 
-if CONTRACT_ID is None:
-    ctrs = px.search_contracts(CONTRACT_SEARCH)
-    if not ctrs:
-        raise RuntimeError(f"No contract found for '{CONTRACT_SEARCH}'")
-    CONTRACT_ID = ctrs[0]['id']
-
-open_orders = px.search_open_orders()
-in_trade = len(open_orders) > 0
-
-last_15m, last_1h = None, None
-cache_15m, cache_1h = None, None
-in_trade = False
-
-def retry_api_call(func, max_tries=5, initial_delay=1):
-    """Retry wrapper with exponential backoff and handling of rate limits."""
-    delay = initial_delay
-    for attempt in range(1, max_tries + 1):
-        try:
-            return func()
-        except HTTPError as e:
-            code = e.response.status_code if e.response is not None else None
-            if code == 429:
-                retry_after = e.response.headers.get('Retry-After')
-                sleep_for = int(retry_after) if retry_after and retry_after.isdigit() else delay
-                print(f"[WARN] Rate limited (429). Sleeping {sleep_for}s...")
-                time.sleep(sleep_for)
-                delay = min(delay * 2, 300)
-                continue
-            print(f"[WARN] HTTP {code} error: {e}. Retrying in {delay}s...")
-        except (ReadTimeout, ConnectionError, SSLError) as e:
-            print(f"[WARN] Network error ({type(e).__name__}): {e}. Retrying in {delay}s...")
-        except Exception as e:
-            print(f"[WARN] Unexpected error ({type(e).__name__}): {e}. Retrying in {delay}s...")
-        time.sleep(delay)
-        delay = min(delay * 2, 300)
-    raise RuntimeError(f"API call failed after {max_tries} attempts.")
-
-def last_closed_5min_bar_ny(dt=None):
-    dt = dt or datetime.now(NY_TZ)
-    dt = dt.astimezone(NY_TZ)
-    minute = (dt.minute // 5) * 5
-    bar = dt.replace(minute=minute, second=0, microsecond=0)
-    if bar >= dt:
-        bar -= timedelta(minutes=5)
-    return bar
-
-def retry_api_call(func, max_tries=5, initial_delay=1):
-    """Retry wrapper for API calls, with exponential backoff and rate-limit handling."""
-    delay = initial_delay
-    for attempt in range(1, max_tries + 1):
-        try:
-            return func()
-        except HTTPError as e:
-            code = e.response.status_code if e.response is not None else None
-            if code == 429:
-                print(f"[WARN] Rate limited (HTTP 429). Backing off for {delay}s...")
-            else:
-                print(f"[WARN] HTTP error {code}: {e}. Retrying in {delay}s...")
-        except (ReadTimeout, ConnectionError, SSLError) as e:
-            print(f"[WARN] Network error ({type(e).__name__}): {e}. Retrying in {delay}s...")
-        except Exception as e:
-            print(f"[WARN] Unexpected error ({type(e).__name__}): {e}. Retrying in {delay}s...")
-        time.sleep(delay)
-        delay = min(delay * 2, 60)
-    raise RuntimeError(f"API call failed after {max_tries} attempts.")
-
-def load_bars() -> pd.DataFrame:
-    # Full seed if no file or empty
-    if not os.path.exists(BAR_FILE) or os.stat(BAR_FILE).st_size == 0:
-        return seed_bars()
-    # Try loading CSV
-    try:
-        df = pd.read_csv(
-            BAR_FILE,
-            parse_dates=['datetime'],
-            index_col='datetime'
+class TradingState:
+    """
+    Manages the global state of the trading system.
+    
+    This class encapsulates all stateful components including the model,
+    API connections, market data, and cached indicators.
+    """
+    
+    def __init__(self):
+        # Core components
+        self.model = None
+        self.px = None  # ProjectX API client
+        self.market_hub = None  # SignalR market data
+        
+        # Indicator caches (avoid recomputation)
+        self.f5_cache = None  # 5-minute indicators
+        self.f15_cache = None  # 15-minute indicators
+        self.f1h_cache = None  # 1-hour indicators
+        
+        # Timing tracking
+        self.last_15m_ts = None
+        self.last_1h_ts = None
+        self.last_bar_timestamp = None
+        
+        # Data storage
+        self.df_window = None  # DataFrame of historical bars
+        self.bar_buffer = deque(maxlen=LOOKBACK)  # Real-time bar buffer
+        
+        # Thread safety
+        self.processing_lock = threading.Lock()
+        
+    def initialize(self):
+        """
+        Initialize all components of the trading system.
+        
+        This method:
+        1. Loads the ML model
+        2. Authenticates with the broker API
+        3. Finds and validates the contract
+        4. Loads historical data
+        5. Starts real-time data streaming
+        """
+        global CONTRACT_ID, CONTRACT_SYMBOL
+        
+        # Load trading model
+        print("Loading model...")
+        self.model = joblib.load(MODEL_FILE)
+        
+        # Initialize broker API
+        print("Connecting to broker API...")
+        self.px = ProjectXClient(
+            FUTURES["topstep"]["username"], 
+            FUTURES["topstep"]["api_key"]
         )
-    except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
-        print(f"[WARN] CSV load error ({e}); seeding full history")
-        return seed_bars()
-    # Normalize timezone
-    if df.index.tz is None:
-        df.index = df.index.tz_localize(NY_TZ)
-    else:
-        df.index = df.index.tz_convert(NY_TZ)
-    # If empty after load, seed
-    if df.empty:
-        print("[WARN] Loaded CSV empty; seeding full history")
-        return seed_bars()
-    # Keep only last LOOKBACK bars
-    df = df.tail(LOOKBACK)
-    # Fetch any missing bars
-    last_ts = df.index.max()
-    end_ny = last_closed_5min_bar_ny()
-    if last_ts < end_ny:
-        start_utc = last_ts.astimezone(timezone.utc)
-        end_utc   = end_ny.astimezone(timezone.utc)
-        bars = retry_api_call(lambda: px.get_bars(
+        self.px.authenticate(preferred_account_name="100KTC-V2-68606-92822961")
+        
+        # Find contract
+        if CONTRACT_ID is None:
+            print(f"Searching for contract: {CONTRACT_SEARCH}")
+            contract_info = self.px.get_contract_info(CONTRACT_SEARCH)
+            CONTRACT_ID = contract_info['id']  # Numeric ID for REST
+            CONTRACT_SYMBOL = contract_info['id']  # String for SignalR
+            CONTRACT_NAME = contract_info['name'] # Reference name
+            print(f"Contract found: {CONTRACT_NAME} (ID: {CONTRACT_ID})")
+        
+        # Load historical data
+        print("Loading historical bars...")
+        self.df_window = self.load_initial_bars()
+        print(f"Loaded {len(self.df_window)} bars")
+        
+        # Convert to buffer for real-time updates
+        for _, row in self.df_window.iterrows():
+            self.bar_buffer.append({
+                't': row.name,
+                'o': row['open'],
+                'h': row['high'],
+                'l': row['low'],
+                'c': row['close'],
+                'v': row['volume']
+            })
+        
+        # Initialize SignalR connection
+        print("Connecting to real-time market data...")
+        self.market_hub = TopStepMarketDataManager(self.px.token)
+        self.market_hub.add_bar_handler(self.on_new_bar)
+        self.market_hub.start(CONTRACT_SYMBOL)
+        
+    def load_initial_bars(self) -> pd.DataFrame:
+        """
+        Load initial historical bars from the API.
+        
+        Returns:
+            DataFrame with OHLCV data indexed by datetime
+        """
+        end_ny = datetime.now(NY_TZ).replace(second=0, microsecond=0)
+        start_ny = end_ny - timedelta(minutes=LOOKBACK * 5)
+        
+        bars = self.px.get_bars(
             CONTRACT_ID,
-            start_utc,
-            end_utc,
-            unit=2, unit_number=5,
-            limit=int((end_ny - last_ts).total_seconds() // 300)
-        ))
-        if bars:
-            new_df = pd.DataFrame(bars)
-            new_df['t'] = pd.to_datetime(new_df['t'], utc=True).dt.tz_convert(NY_TZ)
-            new_df.rename(columns={
-                't':'datetime','o':'open','h':'high',
-                'l':'low','c':'close','v':'volume'
-            }, inplace=True)
-            new_df.set_index('datetime', inplace=True)
-            new_df.sort_index(inplace=True)
-            new_df = new_df[new_df.index > last_ts]
-            if not new_df.empty:
-                df = pd.concat([df, new_df]).tail(LOOKBACK)
-                new_df.to_csv(BAR_FILE, mode='a', header=False)
-    return df
+            start_ny.astimezone(timezone.utc),
+            end_ny.astimezone(timezone.utc),
+            unit=2,  # Minutes
+            unit_number=5,
+            limit=LOOKBACK
+        )
+        
+        if not bars:
+            raise RuntimeError("No bars returned from API")
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(bars)
+        df['t'] = pd.to_datetime(df['t'], utc=True).dt.tz_convert(NY_TZ)
+        df.rename(columns={
+            't': 'datetime', 'o': 'open', 'h': 'high',
+            'l': 'low', 'c': 'close', 'v': 'volume'
+        }, inplace=True)
+        df.set_index('datetime', inplace=True)
+        df.sort_index(inplace=True)
+        
+        # Save initial data
+        os.makedirs(os.path.dirname(BAR_FILE), exist_ok=True)
+        df.to_csv(BAR_FILE)
+        
+        return df
+        
+    def on_new_bar(self, bar_data: dict):
+        """
+        Callback for new bar from SignalR.
+        
+        This method is called whenever a 5-minute bar completes.
+        It updates the data, saves to disk, and triggers signal processing.
+        
+        Args:
+            bar_data: Dictionary with OHLCV data and timestamp
+        """
+        with self.processing_lock:
+            try:
+                # Parse bar timestamp
+                bar_time = pd.to_datetime(bar_data['t']).tz_localize('UTC').tz_convert(NY_TZ)
+                
+                # Skip if not a new bar
+                if self.last_bar_timestamp and bar_time <= self.last_bar_timestamp:
+                    return
+                
+                print(f"\n[{datetime.now(NY_TZ):%H:%M:%S}] New 5min bar completed: {bar_time}")
+                
+                # Add to buffer
+                self.bar_buffer.append({
+                    't': bar_time,
+                    'o': bar_data['o'],
+                    'h': bar_data['h'],
+                    'l': bar_data['l'],
+                    'c': bar_data['c'],
+                    'v': bar_data['v']
+                })
+                
+                # Update DataFrame
+                self.df_window = buffer_to_dataframe(self.bar_buffer)
+                self.last_bar_timestamp = bar_time
+                
+                # Append to file
+                append_bar_to_file(bar_data)
+                
+                # Process signal in separate thread
+                threading.Thread(
+                    target=process_new_bar_signal,
+                    args=(self.df_window.copy(), bar_time),
+                    daemon=True
+                ).start()
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to process new bar: {e}")
+                traceback.print_exc()
 
-def next_5min_boundary(dt: datetime) -> datetime:
-    """
-    Given a tz-aware datetime `dt`, return the next datetime
-    whose minute % 5 == 0, second == 0, microsecond == 0.
-    """
-    # how many minutes past the last 5-min mark?
-    over = dt.minute % 5
-    # minutes to add to hit the next multiple of 5
-    to_add = (5 - over) if over != 0 else 5
-    # zero out seconds/microseconds and add
-    next_bar = (dt
-        .replace(second=0, microsecond=0)
-        + timedelta(minutes=to_add)
-    )
-    return next_bar
 
-def seed_bars() -> pd.DataFrame:
-    end_ny = last_closed_5min_bar_ny()
-    start_ny = end_ny - timedelta(minutes=LOOKBACK * 5 - 5)
-    bars = retry_api_call(lambda: px.get_bars(
-        CONTRACT_ID,
-        start_ny.astimezone(timezone.utc),
-        end_ny.astimezone(timezone.utc),
-        unit=2, unit_number=5,
-        limit=LOOKBACK
-    ))
-    df = pd.DataFrame(bars)
-    df['t'] = pd.to_datetime(df['t'], utc=True).dt.tz_convert(NY_TZ)
+# Create global state instance
+state = TradingState()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UTILITY FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def round_tick(price: float) -> float:
+    """
+    Round price to nearest tick size.
+    
+    Args:
+        price: Raw price value
+        
+    Returns:
+        Price rounded to nearest tick
+    """
+    if price is None:
+        return None
+    return round(price * 4) * 0.25  # Fast tick rounding
+
+
+def buffer_to_dataframe(buffer: deque) -> pd.DataFrame:
+    """
+    Convert bar buffer to pandas DataFrame.
+    
+    Args:
+        buffer: Deque of bar dictionaries
+        
+    Returns:
+        DataFrame with OHLCV data indexed by datetime
+    """
+    data = list(buffer)
+    df = pd.DataFrame(data)
+    df.set_index('t', inplace=True)
+    df.index.name = 'datetime'
     df.rename(columns={
-        't':'datetime','o':'open','h':'high',
-        'l':'low','c':'close','v':'volume'
+        'o': 'open', 'h': 'high',
+        'l': 'low', 'c': 'close', 'v': 'volume'
     }, inplace=True)
-    df.set_index('datetime', inplace=True)
-    df.sort_index(inplace=True)
-    df.to_csv(BAR_FILE)
-    return df
+    return df.sort_index()
 
-def is_new_bar(now: datetime, last: datetime, mins: int) -> bool:
-    return last is None or (now - last).total_seconds() >= mins * 60
 
-def prepare_features(df5: pd.DataFrame,
-                     df15: pd.DataFrame,
-                     df1h: pd.DataFrame,
-                     now: datetime) -> pd.DataFrame:
-    f5 = compute_all_indicators(df5.copy(), suffix='_5min', features=['all'])
-    f5 = session_times(f5)
+def append_bar_to_file(bar_data: dict):
+    """
+    Append new bar to CSV file for persistence.
+    
+    Args:
+        bar_data: Bar dictionary with OHLCV data
+    """
+    try:
+        bar_time = pd.to_datetime(bar_data['t']).tz_localize('UTC').tz_convert(NY_TZ)
+        with open(BAR_FILE, 'a') as f:
+            f.write(f"{bar_time},{bar_data['o']},{bar_data['h']},{bar_data['l']},{bar_data['c']},{bar_data['v']}\n")
+    except Exception as e:
+        print(f"[WARN] Failed to append bar to file: {e}")
 
-    global last_15m, cache_15m
-    if is_new_bar(now, last_15m, 15):
-        cache_15m = compute_all_indicators(df15.copy(), suffix='_15min', features=['volume_trend', 'prev_swing', 'trend', 'poc', 'adx', 'ema', 'atr'])
-        last_15m = now
-    f15 = cache_15m
 
-    global last_1h, cache_1h
-    if is_new_bar(now, last_1h, 60):
-        cache_1h = compute_all_indicators(df1h.copy(), suffix='_1h', features=['adx', 'poc'])
-        last_1h = now
-    f1h = cache_1h
+def check_trading_hours(now: datetime) -> bool:
+    """
+    Check if current time is within trading hours.
+    
+    Args:
+        now: Current datetime in NY timezone
+        
+    Returns:
+        True if within trading hours, False otherwise
+    """
+    # Skip 4 PM - 5 PM ET (market closed)
+    return not (16 <= now.hour <= 17)
 
-    df = pd.merge_asof(
-        f5.sort_index(), f15.filter(regex='_15min$').sort_index(),
-        left_index=True, right_index=True, direction='backward'
-    )
-    df = pd.merge_asof(
-        df.sort_index(), f1h.filter(regex='_1h$').sort_index(),
-        left_index=True, right_index=True, direction='backward'
-    )
-    df.ffill(inplace=True)
-    return df.tail(1)
 
-def act_on_signal(df: pd.DataFrame):
-    global in_trade
-    if in_trade:
-        print("[act_on_signal] In trade, skipping signal logic.")
+# ═══════════════════════════════════════════════════════════════════════════
+# INDICATOR COMPUTATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_indicators_cached(df: pd.DataFrame, timeframe: str, features: list) -> pd.DataFrame:
+    """
+    Compute technical indicators with intelligent caching.
+    
+    This function avoids recomputing indicators when only new bars are added,
+    significantly improving performance.
+    
+    Args:
+        df: OHLCV DataFrame
+        timeframe: Time period ('5min', '15min', '1h')
+        features: List of indicator features to compute
+        
+    Returns:
+        DataFrame with computed indicators
+    """
+    if timeframe == '5min':
+        # For 5min, try incremental computation
+        if state.f5_cache is not None and len(df) > len(state.f5_cache):
+            new_rows = len(df) - len(state.f5_cache)
+            if new_rows <= 5:  # Only if a few new bars
+                # Compute indicators for recent data with context
+                new_data = df.tail(50)  # Get enough context for indicators
+                new_indicators = compute_all_indicators(new_data, suffix='_5min', features=features)
+                new_indicators = session_times(new_indicators)
+                # Append only new rows to cache
+                result = pd.concat([state.f5_cache, new_indicators.tail(new_rows)])
+                return result.tail(LOOKBACK)
+    
+    # Full computation for other timeframes or when cache is stale
+    result = compute_all_indicators(df.copy(), suffix=f'_{timeframe}', features=features)
+    if timeframe == '5min':
+        result = session_times(result)
+    return result
+
+
+def is_new_timeframe_bar(now: datetime, last_ts: datetime, minutes: int) -> bool:
+    """
+    Check if we need to compute new indicators for a timeframe.
+    
+    Args:
+        now: Current time
+        last_ts: Last computation timestamp
+        minutes: Timeframe in minutes
+        
+    Returns:
+        True if new computation needed
+    """
+    if last_ts is None:
+        return True
+    return (now - last_ts).total_seconds() >= minutes * 60
+
+
+def prepare_features_realtime(df_window: pd.DataFrame, now: datetime) -> pd.DataFrame:
+    """
+    Prepare feature set for model prediction.
+    
+    This function computes all required indicators across multiple timeframes
+    and merges them into a single feature vector.
+    
+    Args:
+        df_window: Historical OHLCV data
+        now: Current timestamp
+        
+    Returns:
+        DataFrame with one row containing all features
+    """
+    # Always compute 5min indicators (base timeframe)
+    state.f5_cache = compute_indicators_cached(df_window, '5min', ['all'])
+    
+    # Compute 15min indicators when needed
+    if is_new_timeframe_bar(now, state.last_15m_ts, 15):
+        df15 = df_window.resample('15min', closed='left', label='left').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 
+            'close': 'last', 'volume': 'sum'
+        }).dropna()
+        
+        state.f15_cache = compute_all_indicators(
+            df15.copy(), 
+            suffix='_15min', 
+            features=['volume_trend', 'prev_swing', 'trend', 'poc', 'adx', 'ema', 'atr']
+        )
+        state.last_15m_ts = now
+    
+    # Compute 1h indicators when needed
+    if is_new_timeframe_bar(now, state.last_1h_ts, 60):
+        df1h = df_window.resample('1h', closed='left', label='left').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 
+            'close': 'last', 'volume': 'sum'
+        }).dropna()
+        
+        state.f1h_cache = compute_all_indicators(
+            df1h.copy(), 
+            suffix='_1h', 
+            features=['adx', 'poc']
+        )
+        state.last_1h_ts = now
+    
+    # Merge all timeframes into final feature set
+    if state.f15_cache is not None and state.f1h_cache is not None:
+        # Get latest 5min row
+        f5_last = state.f5_cache.iloc[[-1]].copy()
+        
+        # Get latest values from higher timeframes
+        f15_latest = state.f15_cache.filter(regex='_15min').iloc[[-1]]
+        f1h_latest = state.f1h_cache.filter(regex='_1h').iloc[[-1]]
+        
+        # Merge all features
+        for col in f15_latest.columns:
+            f5_last[col] = f15_latest[col].iloc[0]
+        for col in f1h_latest.columns:
+            f5_last[col] = f1h_latest[col].iloc[0]
+            
+        return f5_last
+    
+    # Return whatever we have if higher timeframes not ready
+    return state.f5_cache.tail(1) if state.f5_cache is not None else pd.DataFrame()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SIGNAL PROCESSING AND ORDER MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
+
+def process_new_bar_signal(df_window: pd.DataFrame, bar_time: datetime):
+    """
+    Process trading signal for a newly completed bar.
+    
+    This function:
+    1. Checks trading hours
+    2. Verifies no existing orders
+    3. Prepares features
+    4. Generates prediction
+    5. Places order if signal present
+    
+    Args:
+        df_window: Historical OHLCV data
+        bar_time: Timestamp of the completed bar
+    """
+    now = datetime.now(NY_TZ)
+    
+    # Check trading hours
+    if not check_trading_hours(now):
+        # Cancel any open orders outside trading hours
+        try:
+            open_orders = state.px.search_open_orders()
+            for order in open_orders:
+                oid = order.get('orderId') or order.get('id')
+                state.px.cancel_order(oid)
+                print(f"[{now}] Canceled after-hours order {oid}")
+        except Exception as e:
+            print(f"[WARN] Failed to cancel after-hours orders: {e}")
         return
 
-    if df.empty:
-        print("[act_on_signal] ERROR: DataFrame is empty, cannot resample.")
-        return
-
-    # Clean and check column names
-    df.columns = df.columns.str.strip()
-    df.columns = df.columns.str.replace('\ufeff', '')
-    required_cols = ['open', 'high', 'low', 'close', 'volume']
-    for col in required_cols:
-        if col not in df.columns:
-            print(f"[act_on_signal] ERROR: Missing column {col}! Columns: {list(df.columns)}")
+    # Check for existing open orders
+    try:
+        if state.px.search_open_orders():
+            print("Skipping: existing open orders detected")
             return
-
-    agg_dict = {
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }
-
-    # Resample 15m
-    try:
-        df15 = df.resample('15min', closed='left', label='left').agg(agg_dict).dropna()
     except Exception as e:
-        print("[act_on_signal] ERROR during df15 resample:", e)
-        print("[act_on_signal] Columns at resample:", list(df.columns))
+        print(f"[WARN] Failed to check open orders: {e}")
         return
 
-    # Resample 1h
-    try:
-        df1h = df.resample('1h', closed='left', label='left').agg(agg_dict).dropna()
-    except Exception as e:
-        print("[act_on_signal] ERROR during df1h resample:", e)
-        print("[act_on_signal] Columns at resample:", list(df.columns))
+    # Prepare features
+    features_df = prepare_features_realtime(df_window, now)
+    if features_df.empty:
+        print("Features not ready, skipping signal")
+        return
+        
+    # Verify all required features present
+    missing_features = set(FEATURE_COLUMNS) - set(features_df.columns)
+    if missing_features:
+        print(f"Missing features: {missing_features}")
         return
 
-    # Proceed with original logic
-    now = df.index[-1]
-    ohlcv = df.iloc[-1][['open','high','low','close','volume']]
-
-    feats = prepare_features(df, df15, df1h, now)
-    if feats.empty:
-        print("[act_on_signal] Feature DataFrame is empty after prepare_features.")
-        return
-
-    atr = feats['ATR_14_5min'].iat[0]
-    X = feats[FEATURE_COLUMNS]
-    pred = model.predict(X)[0]
+    # Extract feature vector
+    X = features_df[FEATURE_COLUMNS].iloc[[-1]]
+    
+    # Get current price and ATR for position sizing
+    atr = features_df['ATR_14_5min'].iat[-1]
+    price = df_window['close'].iat[-1]
+    
+    # Generate prediction
+    pred = state.model.predict(X)[0]
+    
+    # Map prediction to action
+    # Assuming: 0 = no signal, 1 = buy, 2 = sell
     if pred not in (1, 2):
-        print("No Trade prediction, waiting for next candle")
+        print(f"No trade signal (prediction={pred}) for bar {bar_time}")
         return
 
-    open_side = 'Buy' if pred == 1 else 'Sell'
-    exit_side = 'Sell' if open_side == 'Buy' else 'Buy'
+    # Determine trade direction and calculate TP/SL
+    if pred == 1:  # Buy signal
+        side = 'Buy'
+        tp_price = round_tick(price + (TP_ATR_MULTIPLIER * atr))
+        sl_price = round_tick(price - (SL_ATR_MULTIPLIER * atr))
+    else:  # Sell signal
+        side = 'Sell'
+        tp_price = round_tick(price - (TP_ATR_MULTIPLIER * atr))
+        sl_price = round_tick(price + (SL_ATR_MULTIPLIER * atr))
 
-    print(f"Predicted {open_side}")
-    price = ohlcv['close']
-    tp_price = price + (tp_atr_mult * atr if pred == 1 else -tp_atr_mult * atr)
-    sl_price = price - (sl_atr_mult * atr if pred == 1 else -sl_atr_mult * atr)
-
-    px.place_order(CONTRACT_ID, open_side, quantity=1)
-    result_oco = px.place_oco_exit(
-        CONTRACT_ID,
-        quantity=1,
-        take_profit=tp_price,
-        stop_loss=sl_price,
-        side=exit_side
-    )
-    in_trade = True
-    print(f"{now} {open_side}@{price:.2f}, TP={tp_price:.2f}, SL={sl_price:.2f}, OCO={result_oco}")
-
-try:
-    df_window = load_bars()
-except Exception as e:
-    print(f"[ERROR] Initial load_bars failed: {e}")
-    df_window = pd.DataFrame(columns=['open','high','low','close','volume'])
-
-prev_expected_ts = None
-# Main loop
-print("Starting live-trade loop...")
-while True:
+    # Place order
     try:
-        now_ny   = datetime.now(NY_TZ)
-        expected_bar = last_closed_5min_bar_ny(now_ny)
-        next_bar = next_5min_boundary(now_ny)
-        sleep_s  = max((next_bar - now_ny).total_seconds(), 1)
-        print(f"[{now_ny:%H:%M:%S}] Sleeping {sleep_s:.1f}s until {next_bar:%H:%M:%S}")
-        time.sleep(sleep_s)
-        # Reload bars (seed if needed)
-        df_window = load_bars()
-
-        # Only run if expected bar is present and not yet processed
-        if expected_bar in df_window.index and expected_bar != prev_expected_ts:
-            print(f"Expected bar detected: {expected_bar}. Running trading logic.")
-            act_on_signal(df_window)
-            prev_expected_ts = expected_bar
-        else:
-            print(f"Skipping: expected bar {expected_bar} not ready or already processed.")
-
-    except Exception:
-        print(f"[{datetime.now(timezone.utc)}] Exception:")
+        state.px.place_order(
+            CONTRACT_ID, 
+            side, 
+            quantity=1, 
+            limit_price=tp_price, 
+            stop_price=sl_price
+        )
+        
+        print(f"[{now}] {side} signal @ {price:.2f}")
+        print(f"  TP: {tp_price:.2f} (+{abs(tp_price - price):.2f} pts)")
+        print(f"  SL: {sl_price:.2f} (-{abs(sl_price - price):.2f} pts)")
+        print(f"  Bar: {bar_time}")
+        
+    except Exception as e:
+        print(f"[ERROR] Order placement failed: {e}")
         traceback.print_exc()
-        time.sleep(5)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MAIN EXECUTION
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main():
+    """
+    Main execution loop for the live trading system.
+    
+    This function:
+    1. Initializes all components
+    2. Starts real-time data streaming
+    3. Maintains connection health
+    4. Handles graceful shutdown
+    """
+    print("=" * 70)
+    print("LIVE TRADING SYSTEM WITH SIGNALR")
+    print("=" * 70)
+    
+    try:
+        # Initialize everything
+        state.initialize()
+        print(f"\n✓ System initialized successfully")
+        print(f"✓ Contract: {CONTRACT_SYMBOL}")
+        print(f"✓ Historical bars: {len(state.df_window)}")
+        print(f"✓ Real-time data: Connected")
+        print("\nWaiting for market data...\n")
+        
+        # Show initial market quote
+        time.sleep(2)
+        latest_quote = state.market_hub.get_latest_quote(CONTRACT_SYMBOL)
+        if latest_quote:
+            bid = latest_quote.get('bid', 'N/A')
+            ask = latest_quote.get('ask', 'N/A')
+            print(f"Current market: Bid={bid} Ask={ask}")
+        
+    except Exception as e:
+        print(f"\n[FATAL] Initialization failed: {e}")
+        traceback.print_exc()
+        return
+
+    # Main loop - just keeps the program running
+    # All actual work happens in SignalR callbacks
+    try:
+        print("\nSystem running. Press Ctrl+C to stop.\n")
+        
+        while True:
+            time.sleep(10)
+            
+            # Periodic health check
+            if not state.market_hub.market_hub.is_connected:
+                print(f"\n[{datetime.now(NY_TZ):%H:%M:%S}] SignalR disconnected, reconnecting...")
+                if state.market_hub.market_hub.connect():
+                    print("Reconnected successfully")
+                else:
+                    print("Reconnection failed")
+            
+            # Optional: Show market heartbeat every minute
+            if datetime.now().second < 5:
+                quote = state.market_hub.get_latest_quote(CONTRACT_SYMBOL)
+                if quote:
+                    bid = quote.get('bid', 'N/A')
+                    ask = quote.get('ask', 'N/A')
+                    spread = float(ask) - float(bid) if bid != 'N/A' and ask != 'N/A' else 'N/A'
+                    print(f"[{datetime.now(NY_TZ):%H:%M:%S}] Heartbeat: Bid={bid} Ask={ask} Spread={spread}")
+                else:
+                    print(f"No quotes for {CONTRACT_SYMBOL}")
+                
+    except KeyboardInterrupt:
+        print("\n\nShutting down...")
+        
+        # Graceful shutdown
+        if state.market_hub:
+            print("- Disconnecting market data...")
+            state.market_hub.stop()
+            
+        print("- Shutdown complete")
+        
+    except Exception as e:
+        print(f"\n[FATAL] Unexpected error: {e}")
+        traceback.print_exc()
+        
+        # Emergency shutdown
+        if state.market_hub:
+            state.market_hub.stop()
+
+
+if __name__ == "__main__":
+    main()
