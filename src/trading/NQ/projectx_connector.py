@@ -18,7 +18,6 @@ Date: 2024
 import os
 import json
 import logging
-import sys
 import threading
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
@@ -30,12 +29,6 @@ from urllib3.util.retry import Retry
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stdout, # Log to the console
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 
 
 class ProjectXClient:
@@ -110,7 +103,7 @@ class ProjectXClient:
         
         # Retry strategy for transient failures
         retry_strategy = Retry(
-            total=10,  # Reduced retries for speed
+            total=2,  # Reduced retries for speed
             backoff_factor=0.5,  # Faster backoff
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST", "GET"]
@@ -451,6 +444,7 @@ class ProjectXClient:
         Raises:
             RuntimeError: If order placement fails
         """
+        tick = 0.25
         
         # Convert string to int if needed for REST API
         if isinstance(contract_id, str) and contract_id.isdigit():

@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -96,3 +97,84 @@ def classification_insights(
         "confusion_matrix": cm,
         "roc_auc": roc_auc,
     }
+
+def compute_max_consecutive_loss(df):
+    """
+    Calculates the worst cumulative loss (drawdown) from any starting point.
+    """
+    pnl_series = df['pnl'].values
+    max_loss = 0.0
+    start_idx = 0
+    end_idx = 0
+
+    for i in range(len(pnl_series)):
+        cumulative = 0.0
+        for j in range(i, len(pnl_series)):
+            cumulative += pnl_series[j]
+            if cumulative < max_loss:
+                max_loss = cumulative
+                start_idx = i
+                end_idx = j
+
+    return max_loss, df['entry_time'].iloc[start_idx], df['entry_time'].iloc[end_idx]
+
+def visualize_results(results):
+    best_result = None
+    for r in results:
+        df = r['results'].copy()
+        df = df.sort_values(by='entry_time')
+        df['cumulative_pnl'] = df['pnl'].cumsum()
+
+        # Count how many trades exited for each reason
+        exit_counts = df['exit_reason'].value_counts(dropna=False)
+        print(exit_counts)
+
+        if (
+            df['cumulative_pnl'].iloc[-1] > 0 and
+            r['sharpe'] > 0.01 and
+            r['trades'] > 1 and
+            r['win_rate'] > 0.001 and
+            r['profit_factor'] > 0.01 and
+            r['expectancy'] > 0.01 and
+            r['pnl'] > 100
+        ):
+            if best_result is None or r['sharpe'] > best_result['sharpe']:
+                best_result = r.copy()
+                best_result['cumulative_pnl'] = df['cumulative_pnl']
+                best_result['entry_time'] = df['entry_time']
+
+                # === Calculate max drawdown (largest PnL loss from peak)
+                cumulative = df['cumulative_pnl']
+                rolling_max = cumulative.cummax()
+                drawdowns = cumulative - rolling_max
+                max_drawdown = drawdowns.min()  # Most negative drop
+                max_drawdown_start = rolling_max[drawdowns.idxmin()]
+                best_result['max_drawdown'] = max_drawdown
+
+    # === Plot the best one ===
+    # === After determining best_result
+    if best_result:
+        df = best_result['results'].copy()
+        df = df.sort_values(by='entry_time')
+        df['cumulative_pnl'] = df['pnl'].cumsum()
+
+        max_loss, loss_start, loss_end = compute_max_consecutive_loss(df)
+
+        # === Plot
+        plt.figure(figsize=(12, 4))
+        plt.plot(df['entry_time'], df['cumulative_pnl'], label='Cumulative PnL', color='green')
+        plt.axvspan(loss_start, loss_end, color='red', alpha=0.2, label='Max Loss Window')
+        plt.title(f"Top Sharpe Strategy | Max Consecutive Loss: {max_loss:.2f} | Cumulative PnL: {best_result['pnl']:.2f}")
+        plt.xlabel("Datetime")
+        plt.ylabel("Cumulative PnL")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+        print(f"💣 Max Consecutive PnL Loss: {max_loss:.2f}")
+        print(f"📆 Period: {loss_start} → {loss_end}")
+        best_result['results'].to_csv("best_strategy_results.csv", index=False)
+        print("✅ Saved best_strategy_results.csv")
+    else:
+        print("❌ No strategy met the conditions.")

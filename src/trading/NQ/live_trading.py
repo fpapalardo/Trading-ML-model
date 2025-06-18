@@ -23,6 +23,7 @@ import threading
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+import pytz
 
 import joblib
 import pandas as pd
@@ -119,21 +120,39 @@ class TradingState:
         
         # Initialize broker API
         print("Connecting to broker API...")
+        print(FUTURES["topstep"]["username"])
         self.px = ProjectXClient(
             FUTURES["topstep"]["username"], 
             FUTURES["topstep"]["api_key"]
         )
-        self.px.authenticate(preferred_account_name="100KTC-V2-68606-92822961")
+        self.px.authenticate(preferred_account_name="50KTC-V2-68606-64426385")
         
+        # Find contract
+        # In TradingState.initialize() method, replace the contract finding logic with:
+
         # Find contract
         if CONTRACT_ID is None:
             print(f"Searching for contract: {CONTRACT_SEARCH}")
             contract_info = self.px.get_contract_info(CONTRACT_SEARCH)
-            CONTRACT_ID = contract_info['id']  # Numeric ID for REST
-            CONTRACT_SYMBOL = contract_info['id']  # String for SignalR
-            CONTRACT_NAME = contract_info['name'] # Reference name
-            print(f"Contract found: {CONTRACT_NAME} (ID: {CONTRACT_ID})")
+            
+            # The 'id' field is already in the correct format for both REST and SignalR
+            CONTRACT_ID = contract_info['id']  # This is the full symbol like 'CON.F.US.MNQ.U25'
+            CONTRACT_SYMBOL = contract_info['id']  # Same value for SignalR
+            
+            print(f"Contract found: {CONTRACT_SYMBOL}")
+            print(f"  Name: {contract_info['raw']['name']}")
+            print(f"  Description: {contract_info['raw']['description']}")
         
+        NY_TZ = pytz.timezone("America/New_York")
+        now = datetime.now(NY_TZ)
+        # how many seconds have elapsed in the current 5-min bucket?
+        secs_into_bucket = (now.minute % 5) * 60 + now.second
+        # how many seconds remain until the next multiple of 5 min?
+        wait_secs = 5*60 - secs_into_bucket
+        if wait_secs > 0:
+            print(f"Waiting {wait_secs:.0f}s for next 5-min boundary…")
+            time.sleep(wait_secs)
+
         # Load historical data
         print("Loading historical bars...")
         self.df_window = self.load_initial_bars()
@@ -207,7 +226,7 @@ class TradingState:
         with self.processing_lock:
             try:
                 # Parse bar timestamp
-                bar_time = pd.to_datetime(bar_data['t']).tz_localize('UTC').tz_convert(NY_TZ)
+                bar_time = pd.to_datetime(bar_data['t'], utc=True).tz_convert(NY_TZ)
                 
                 # Skip if not a new bar
                 if self.last_bar_timestamp and bar_time <= self.last_bar_timestamp:
@@ -296,7 +315,7 @@ def append_bar_to_file(bar_data: dict):
         bar_data: Bar dictionary with OHLCV data
     """
     try:
-        bar_time = pd.to_datetime(bar_data['t']).tz_localize('UTC').tz_convert(NY_TZ)
+        bar_time = pd.to_datetime(bar_data['t'], utc=True).tz_convert(NY_TZ)
         with open(BAR_FILE, 'a') as f:
             f.write(f"{bar_time},{bar_data['o']},{bar_data['h']},{bar_data['l']},{bar_data['c']},{bar_data['v']}\n")
     except Exception as e:
@@ -462,6 +481,7 @@ def process_new_bar_signal(df_window: pd.DataFrame, bar_time: datetime):
     
     # Check trading hours
     if not check_trading_hours(now):
+        print("Outside of trading hours")
         # Cancel any open orders outside trading hours
         try:
             open_orders = state.px.search_open_orders()
@@ -525,7 +545,7 @@ def process_new_bar_signal(df_window: pd.DataFrame, bar_time: datetime):
         state.px.place_order(
             CONTRACT_ID, 
             side, 
-            quantity=1, 
+            quantity=3, 
             limit_price=tp_price, 
             stop_price=sl_price
         )
@@ -571,8 +591,8 @@ def main():
         time.sleep(2)
         latest_quote = state.market_hub.get_latest_quote(CONTRACT_SYMBOL)
         if latest_quote:
-            bid = latest_quote.get('bid', 'N/A')
-            ask = latest_quote.get('ask', 'N/A')
+            bid = latest_quote.get('bestBid', 'N/A')  # Changed from 'bid'
+            ask = latest_quote.get('bestAsk', 'N/A')  # Changed from 'ask'
             print(f"Current market: Bid={bid} Ask={ask}")
         
     except Exception as e:
@@ -589,23 +609,20 @@ def main():
             time.sleep(10)
             
             # Periodic health check
-            if not state.market_hub.market_hub.is_connected:
+            if not state.market_hub.is_connected:
                 print(f"\n[{datetime.now(NY_TZ):%H:%M:%S}] SignalR disconnected, reconnecting...")
-                if state.market_hub.market_hub.connect():
-                    print("Reconnected successfully")
-                else:
-                    print("Reconnection failed")
+                # Reconnection would require recreating the manager
+                # For now, just log the disconnection
+                print("SignalR disconnected - manual restart required")
             
             # Optional: Show market heartbeat every minute
             if datetime.now().second < 5:
                 quote = state.market_hub.get_latest_quote(CONTRACT_SYMBOL)
                 if quote:
-                    bid = quote.get('bid', 'N/A')
-                    ask = quote.get('ask', 'N/A')
+                    bid = quote.get('bestBid', 'N/A')  # Changed from 'bid'
+                    ask = quote.get('bestAsk', 'N/A')  # Changed from 'ask'
                     spread = float(ask) - float(bid) if bid != 'N/A' and ask != 'N/A' else 'N/A'
                     print(f"[{datetime.now(NY_TZ):%H:%M:%S}] Heartbeat: Bid={bid} Ask={ask} Spread={spread}")
-                else:
-                    print(f"No quotes for {CONTRACT_SYMBOL}")
                 
     except KeyboardInterrupt:
         print("\n\nShutting down...")

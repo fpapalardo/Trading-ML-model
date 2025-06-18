@@ -14,156 +14,6 @@ def session_key(ts: pd.Timestamp) -> pd.Timestamp:
 def is_same_session(start_time: pd.Timestamp, end_time: pd.Timestamp) -> bool:
     return session_key(start_time) == session_key(end_time)
 
-def evaluate_static_tp_two_contracts(
-    X_test,
-    preds_stack,
-    labeled,
-    df,
-    avoid_funcs,
-    TICK_VALUE,
-    is_same_session,
-    long_thresh,
-    short_thresh,
-    SL_POINTS: float = 10.0,    # SL in points
-    TP_POINTS: float = 10.0     # TP in points for both contracts
-):
-    """
-    2 contracts per signal, both with:
-      - Static SL at SL_POINTS
-      - Static TP at TP_POINTS
-    Only enters trades when predicted move exceeds TP_POINTS.
-    """
-    temp = []
-    skipped = 0
-    avoid_hits = defaultdict(int)
-    long_cnt = short_cnt = 0
-
-    idxs = X_test.index.to_list()
-    preds = preds_stack
-
-    i = 0
-    while i < len(idxs):
-        idx = idxs[i]
-        pos = labeled.index.get_loc(idx)
-        if pos + 1 >= len(labeled):
-            skipped += 1; i += 1; continue
-
-        row = labeled.iloc[pos]
-        entry_row = labeled.iloc[pos + 1]
-        entry_price = entry_row["open"]
-        entry_time = row.name - pd.Timedelta(minutes=5)
-        vol_adj_pred = preds[i]
-
-        # Decide trade direction
-        if vol_adj_pred >= long_thresh:
-            side = "long"; long_cnt += 1
-        elif vol_adj_pred <= short_thresh:
-            side = "short"; short_cnt += 1
-        else:
-            skipped += 1; i += 1; continue
-
-        # Apply avoid filters
-        if any(f(row) for f in avoid_funcs.values()):
-            for nm, f in avoid_funcs.items():
-                try:
-                    if f(row):
-                        avoid_hits[nm] += 1
-                except:
-                    pass
-            skipped += 1; i += 1; continue
-
-        # Skip if model doesn't predict move > TP_POINTS
-        pred_move_pts = abs(vol_adj_pred * entry_price)
-        if pred_move_pts < TP_POINTS:
-            skipped += 1; i += 1; continue
-
-        sl_price = entry_price - SL_POINTS if side == "long" else entry_price + SL_POINTS
-        tp_price = entry_price + TP_POINTS if side == "long" else entry_price - TP_POINTS
-
-        for contract in [1, 2]:
-            max_p = min_p = entry_price
-            exit_price = exit_time = exit_reason = None
-            fwd = pos + 1
-            while fwd < len(labeled):
-                r = labeled.iloc[fwd]
-                hi, lo, cl = r["high"], r["low"], r["close"]
-                max_p = max(max_p, hi)
-                min_p = min(min_p, lo)
-
-                # SL
-                if side == "long" and lo <= sl_price:
-                    exit_price, exit_time, exit_reason = sl_price, r.name, f"SL{contract}"; break
-                if side == "short" and hi >= sl_price:
-                    exit_price, exit_time, exit_reason = sl_price, r.name, f"SL{contract}"; break
-
-                # TP
-                if side == "long" and hi >= tp_price:
-                    exit_price, exit_time, exit_reason = tp_price, r.name, f"TP{contract}"; break
-                if side == "short" and lo <= tp_price:
-                    exit_price, exit_time, exit_reason = tp_price, r.name, f"TP{contract}"; break
-
-                # session end
-                if not is_same_session(entry_time, r.name):
-                    exit_price, exit_time, exit_reason = cl, r.name, f"END{contract}"; break
-
-                fwd += 1
-
-            if exit_price is None:
-                rr = labeled.iloc[-1]
-                exit_price, exit_time, exit_reason = rr["close"], rr.name, f"FORCE{contract}"
-
-            gross = (exit_price - entry_price) * TICK_VALUE if side == "long" else (entry_price - exit_price) * TICK_VALUE
-            pnl = gross - 3.98
-            mfe = (max_p - entry_price)*TICK_VALUE if side == "long" else (entry_price - min_p)*TICK_VALUE
-            mae = (entry_price - min_p)*TICK_VALUE if side == "long" else (max_p - entry_price)*TICK_VALUE
-
-            temp.append({
-                "entry_time": entry_time,
-                "exit_time": exit_time,
-                "side": side,
-                "entry_price": entry_price,
-                "exit_price": exit_price,
-                "pnl": pnl,
-                "mfe": mfe,
-                "mae": mae,
-                "gross_pnl": gross,
-                "vol_adj_pred": vol_adj_pred,
-                "exit_reason": exit_reason,
-                "contract": contract
-            })
-
-        # skip ahead until after final exit
-        while i < len(idxs) and labeled.loc[idxs[i]].name <= exit_time:
-            i += 1
-
-    # assemble stats
-    df_trades = pd.DataFrame(temp)
-    pnl_total = df_trades["pnl"].sum()
-    trades = len(df_trades)
-    win_rate = (df_trades["pnl"] > 0).mean() if trades > 0 else 0
-    expectancy = df_trades["pnl"].mean() if trades > 0 else 0
-    profit_factor = (
-        df_trades[df_trades["pnl"] > 0]["pnl"].sum() / abs(df_trades[df_trades["pnl"] < 0]["pnl"].sum())
-        if (df_trades["pnl"] < 0).any() else np.nan
-    )
-    sharpe = (
-        df_trades["pnl"].mean() / (df_trades["pnl"].std() + 1e-9) * np.sqrt(trades)
-        if trades > 1 else 0
-    )
-
-    return {
-        "pnl": pnl_total,
-        "trades": trades,
-        "win_rate": win_rate,
-        "expectancy": expectancy,
-        "profit_factor": profit_factor,
-        "sharpe": sharpe,
-        "long_trades": long_cnt,
-        "short_trades": short_cnt,
-        "avoid_hits": dict(avoid_hits),
-        "results": df_trades
-    }
-
 def evaluate_regression(
     X_test, 
     preds_stack, 
@@ -495,7 +345,7 @@ def evaluate_regression(
     }
 
 def evaluate_classification(
-    X_test, preds_stack, labeled, df,
+    X_test, preds_stack, labeled,
     avoid_funcs,
     TRAIL_START_MULT, TRAIL_STOP_MULT, TICK_VALUE,
     SL_ATR_MULT=1.5, TP_ATR_MULT=2.0,
@@ -609,7 +459,7 @@ def evaluate_classification(
         exit_time  = None
 
         fwd_idx = labeled.index.get_loc(entry_row.name) + 1
-        while fwd_idx < len(df):
+        while fwd_idx < len(labeled):
             fwd_row = labeled.iloc[fwd_idx]
             high_j  = fwd_row["high"]
             low_j   = fwd_row["low"]
