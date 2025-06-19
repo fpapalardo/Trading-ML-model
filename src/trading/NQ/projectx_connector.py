@@ -18,7 +18,6 @@ Date: 2024
 import os
 import json
 import logging
-import sys
 import threading
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
@@ -30,12 +29,6 @@ from urllib3.util.retry import Retry
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stdout, # Log to the console
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 
 
 class ProjectXClient:
@@ -110,7 +103,7 @@ class ProjectXClient:
         
         # Retry strategy for transient failures
         retry_strategy = Retry(
-            total=10,  # Reduced retries for speed
+            total=2,  # Reduced retries for speed
             backoff_factor=0.5,  # Faster backoff
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST", "GET"]
@@ -451,16 +444,29 @@ class ProjectXClient:
         Raises:
             RuntimeError: If order placement fails
         """
+        tick = 0.25
         
         # Convert string to int if needed for REST API
         if isinstance(contract_id, str) and contract_id.isdigit():
             contract_id = int(contract_id)
+
+        payload = {
+            "accountId": self.account_id,
+            "contractId": contract_id,
+            "type": order_type,
+            "side": 0 if side.lower().startswith("buy") else 1,
+            "size": quantity,
+        }
         
         # Fast tick rounding
         if limit_price is not None:
-            limit_price = round(limit_price * 4) * 0.25
+            payload["limitPrice"] = round(limit_price * 4) * 0.25
         if stop_price is not None:
-            stop_price = round(stop_price * 4) * 0.25
+            payload["stopPrice"] = round(stop_price * 4) * 0.25
+        if trail_price is not None:
+            payload["trailPrice"] = trail_price
+        if linked_order_id is not None:
+            payload["linkedOrderId"] = linked_order_id
 
         payload = {
             "accountId": self.account_id,

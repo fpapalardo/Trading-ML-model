@@ -88,3 +88,6 @@ tests/__pycache__/
 # --- Python env ---
 .venv/
 venv/
+
+# --- Egg info ---
+trading_ml.egg-info/

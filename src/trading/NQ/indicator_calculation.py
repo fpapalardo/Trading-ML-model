@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+setattr(np, "NaN", np.nan)
 import pandas_ta as ta
 from datetime import timedelta
 

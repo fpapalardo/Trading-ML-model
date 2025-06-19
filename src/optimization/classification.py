@@ -10,23 +10,20 @@ from xgboost import XGBClassifier
 import lightgbm as lgb
 from catboost import CatBoostClassifier
 from sklearn.linear_model import LogisticRegression
+from config import DB_DIR
 
 def tune_xgboost(
     X_train, y_train,
     market: str,
-    lookahead: int,
-    splits: int = 4,
     n_trials: int = 50,
-    db_dir: str = "notebooks/dbs",
     unique_id: str = None
 ) -> dict:
     """
     Optimize an XGBClassifier using weighted CV and training-set F1 (80/20).
     """
-    study_name = f"xgb_opt_class_{market}_{lookahead}"
+    study_name = f"xgb_opt_class_{market}"
     if unique_id:
         study_name += f"_{unique_id}"
-    storage = f"sqlite:///{db_dir}/{study_name}.db"
 
     def objective(trial):
         params = {
@@ -62,13 +59,9 @@ def tune_xgboost(
         trial.set_user_attr('train_f1', train_f1)
         return score
 
-    study = optuna.create_study(
-        direction='maximize',
+    study = create_study(
         study_name=study_name,
-        sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
-        storage=storage,
-        load_if_exists=True
+        direction="maximize"
     )
     study.optimize(objective, n_trials=n_trials)
     return study.best_params
@@ -76,9 +69,7 @@ def tune_xgboost(
 def tune_lgbm(
     X_train, y_train,
     market: str,
-    splits: int = 4,
     n_trials: int = 50,
-    db_dir: str = "notebooks/dbs",
     unique_id: str = None
 ) -> dict:
     """
@@ -87,7 +78,6 @@ def tune_lgbm(
     study_name = f"lgbm_opt_class_{market}"
     if unique_id:
         study_name += f"_{unique_id}"
-    storage = f"sqlite:///{db_dir}/{study_name}.db"
 
     def objective(trial):
         params = {
@@ -126,13 +116,9 @@ def tune_lgbm(
         trial.set_user_attr('train_f1', train_f1)
         return score
 
-    study = optuna.create_study(
-        direction='maximize',
+    study = create_study(
         study_name=study_name,
-        sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
-        storage=storage,
-        load_if_exists=True
+        direction="maximize"
     )
     study.optimize(objective, n_trials=n_trials)
     return study.best_params
@@ -186,9 +172,7 @@ def tune_rf(
 def tune_catboost(
     X_train, y_train,
     market: str,
-    splits: int = 4,
     n_trials: int = 50,
-    db_dir: str = "notebooks/dbs",
     unique_id: str = None
 ) -> dict:
     """
@@ -197,7 +181,6 @@ def tune_catboost(
     study_name = f"catboost_opt_class_{market}"
     if unique_id:
         study_name += f"_{unique_id}"
-    storage = f"sqlite:///{db_dir}/{study_name}.db"
 
     def objective(trial):
         bootstrap = trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli'])
@@ -236,13 +219,9 @@ def tune_catboost(
         trial.set_user_attr('train_f1', train_f1)
         return score
 
-    study = optuna.create_study(
-        direction='maximize',
+    study = create_study(
         study_name=study_name,
-        sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
-        storage=storage,
-        load_if_exists=True
+        direction="maximize"
     )
     study.optimize(objective, n_trials=n_trials)
     return study.best_params
@@ -250,9 +229,7 @@ def tune_catboost(
 def tune_logistic_regression(
     X_train, y_train,
     market: str,
-    splits: int = 4,
     n_trials: int = 20,
-    db_dir: str = "notebooks/dbs",
     unique_id: str = None
 ) -> dict:
     """
@@ -261,7 +238,6 @@ def tune_logistic_regression(
     study_name = f"logreg_opt_class_{market}"
     if unique_id:
         study_name += f"_{unique_id}"
-    storage = f"sqlite:///{db_dir}/{study_name}.db"
 
     def objective(trial):
         C = trial.suggest_float('C', 1e-3, 1e2, log=True)
@@ -291,13 +267,9 @@ def tune_logistic_regression(
         trial.set_user_attr('train_f1', train_f1)
         return score
 
-    study = optuna.create_study(
-        direction='maximize',
+    study = create_study(
         study_name=study_name,
-        sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
-        storage=storage,
-        load_if_exists=True
+        direction="maximize"
     )
     study.optimize(objective, n_trials=n_trials)
     return study.best_params
