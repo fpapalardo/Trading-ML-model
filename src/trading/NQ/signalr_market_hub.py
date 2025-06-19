@@ -1,16 +1,16 @@
 """
-TopStepX SignalR WebSocket Client - Working Implementation
+Enhanced SignalR WebSocket Client with Auto-Reconnect
 
-This implementation correctly handles TopStepX's SignalR authentication
-by passing the token as a query parameter, matching the working JS/C# examples.
+This enhanced version adds automatic reconnection capability with exponential backoff
+and maintains subscription state across reconnections.
 """
 
 import asyncio
 import json
 import logging
-from typing import Dict, Optional, Callable, List
+from typing import Dict, Optional, Callable, List, Set
 from datetime import datetime
-from collections import defaultdict
+from collections import defaultdict, deque
 from threading import Lock
 import websockets
 from urllib.parse import quote
@@ -22,8 +22,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class TopStepXSignalRClient:
-    """Direct SignalR WebSocket implementation for TopStepX."""
+class ReconnectingSignalRClient:
+    """SignalR WebSocket client with automatic reconnection."""
     
     def __init__(self, token: str):
         self.token = token
@@ -36,46 +36,99 @@ class TopStepXSignalRClient:
             'GatewayDepth': []
         }
         self.message_id = 0
-        self.pending_subscription = None
         self._handshake_ack = asyncio.Event()
         
+        # Reconnection settings
+        self.reconnect_interval = 5  # Initial reconnect delay in seconds
+        self.max_reconnect_interval = 60  # Maximum reconnect delay
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = None  # None = infinite attempts
+        
+        # Subscription tracking for reconnection
+        self.subscribed_contracts: Set[str] = set()
+        self._reconnecting = False
+        self._connection_lock = asyncio.Lock()
+        
     async def connect(self) -> bool:
-        """Connect to TopStepX SignalR hub, send handshake, and wait for ack."""
-        try:
-            # Build WebSocket URL
-            ws_url = f"{self.base_url}?access_token={self.token}"
-            logger.info("Connecting to TopStepX SignalR hub...")
+        """Connect to TopStepX SignalR hub with reconnection logic."""
+        async with self._connection_lock:
+            if self.ws and not self.ws.closed:
+                logger.info("Already connected")
+                return True
+                
+            try:
+                # Build WebSocket URL
+                ws_url = f"{self.base_url}?access_token={self.token}"
+                logger.info("Connecting to TopStepX SignalR hub...")
 
-            # Connect (you can relax ping settings if you like)
-            self.ws = await websockets.connect(
-                ws_url,
-                ping_interval=30,    # give more leeway
-                ping_timeout=30,
-            )
-            self.running = True
-            logger.info("WebSocket connected successfully")
+                # Connect with relaxed ping settings
+                self.ws = await websockets.connect(
+                    ws_url,
+                    ping_interval=60,
+                    ping_timeout=30,
+                    close_timeout=10
+                )
+                self.running = True
+                self.reconnect_attempts = 0  # Reset on successful connection
+                logger.info("WebSocket connected successfully")
 
-            # Clear any old handshake event (in case of reconnect)
-            self._handshake_ack.clear()
+                # Clear any old handshake event
+                self._handshake_ack.clear()
 
-            # Send SignalR handshake
-            await self._send_handshake()
+                # Send SignalR handshake
+                await self._send_handshake()
 
-            # Start processing incoming messages
-            asyncio.create_task(self._message_handler())
+                # Start processing incoming messages
+                asyncio.create_task(self._message_handler())
 
-            # Wait up to 3s for the server to ack our handshake
-            await asyncio.wait_for(self._handshake_ack.wait(), timeout=3)
-            logger.info("Handshake confirmed—hub is ready")
+                # Wait for handshake
+                await asyncio.wait_for(self._handshake_ack.wait(), timeout=3)
+                logger.info("Handshake confirmed—hub is ready")
 
-            return True
+                # Re-subscribe to any previously subscribed contracts
+                if self._reconnecting and self.subscribed_contracts:
+                    logger.info(f"Re-subscribing to {len(self.subscribed_contracts)} contracts")
+                    for contract_id in self.subscribed_contracts:
+                        await self._subscribe_contract_internal(contract_id)
+                
+                self._reconnecting = False
+                return True
+                
+            except asyncio.TimeoutError:
+                logger.error("Handshake timeout—server never confirmed")
+            except Exception as e:
+                logger.error(f"Connection failed: {e}")
+                
+            self.running = False
+            return False
+    
+    async def _reconnect_loop(self):
+        """Automatic reconnection with exponential backoff."""
+        self._reconnecting = True
+        
+        while not self.running:
+            # Check if we've exceeded max attempts
+            if (self.max_reconnect_attempts is not None and 
+                self.reconnect_attempts >= self.max_reconnect_attempts):
+                logger.error("Maximum reconnection attempts reached")
+                self.running = False
+                break
             
-        except asyncio.TimeoutError:
-            logger.error("Handshake timeout—server never confirmed")
-        except Exception as e:
-            logger.error(f"Connection failed: {e}")
-        self.running = False
-        return False
+            # Calculate backoff delay
+            delay = min(
+                self.reconnect_interval * (2 ** self.reconnect_attempts),
+                self.max_reconnect_interval
+            )
+            
+            logger.info(f"Reconnecting in {delay} seconds (attempt {self.reconnect_attempts + 1})")
+            await asyncio.sleep(delay)
+            
+            self.reconnect_attempts += 1
+            
+            # Try to reconnect
+            if await self.connect():
+                logger.info("Reconnection successful")
+                break
     
     async def _send_handshake(self):
         """Send SignalR handshake message."""
@@ -103,9 +156,18 @@ class TopStepXSignalRClient:
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning(f"WebSocket connection closed: {e}")
             self.running = False
+            
+            # Start reconnection
+            if not self._reconnecting:
+                asyncio.create_task(self._reconnect_loop())
+                
         except Exception as e:
             logger.error(f"Message handler error: {e}")
             self.running = False
+            
+            # Start reconnection
+            if not self._reconnecting:
+                asyncio.create_task(self._reconnect_loop())
     
     async def _process_message(self, message: str):
         """Process a SignalR message."""
@@ -129,7 +191,6 @@ class TopStepXSignalRClient:
                 if target in self.callbacks:
                     for callback in self.callbacks[target]:
                         try:
-                            # Pass all arguments to the callback
                             await callback(*arguments)
                         except Exception as e:
                             logger.error(f"Callback error for {target}: {e}", exc_info=True)
@@ -147,7 +208,6 @@ class TopStepXSignalRClient:
                     self.running = False
                 else:
                     logger.debug(f"Received close message: {data}")
-                    # Don't immediately close - might be protocol message
                     
             elif msg_type == 3:  # Result
                 logger.debug(f"Invocation result: {data}")
@@ -185,6 +245,12 @@ class TopStepXSignalRClient:
         logger.debug(f"Invoking {method} with args: {args}")
         await self.ws.send(msg_str)
     
+    async def _subscribe_contract_internal(self, contract_id: str):
+        """Internal method to subscribe to a contract."""
+        await self.invoke("SubscribeContractQuotes", contract_id)
+        await self.invoke("SubscribeContractTrades", contract_id)
+        await self.invoke("SubscribeContractMarketDepth", contract_id)
+    
     async def subscribe_contract(self, contract_id: str):
         """Subscribe to market data for a contract."""
         if not self.running:
@@ -193,15 +259,18 @@ class TopStepXSignalRClient:
             
         logger.info(f"Subscribing to contract: {contract_id}")
         try:
-            await self.invoke("SubscribeContractQuotes", contract_id)
-            await self.invoke("SubscribeContractTrades", contract_id)
-            await self.invoke("SubscribeContractMarketDepth", contract_id)
+            # Track subscription for reconnection
+            self.subscribed_contracts.add(contract_id)
+            await self._subscribe_contract_internal(contract_id)
         except Exception as e:
             logger.error(f"Subscription failed: {e}")
             raise
     
     async def unsubscribe_contract(self, contract_id: str):
         """Unsubscribe from market data for a contract."""
+        # Remove from tracked subscriptions
+        self.subscribed_contracts.discard(contract_id)
+        
         await self.invoke("UnsubscribeContractQuotes", contract_id)
         await self.invoke("UnsubscribeContractTrades", contract_id)
         await self.invoke("UnsubscribeContractMarketDepth", contract_id)
@@ -219,6 +288,175 @@ class TopStepXSignalRClient:
             self.ws = None
 
 
+# Update TopStepXSignalRClient to inherit from ReconnectingSignalRClient
+class TopStepXSignalRClient(ReconnectingSignalRClient):
+    """TopStepX SignalR client with reconnection support."""
+    pass
+
+
+# Enhanced Market Hub with better error handling
+class TopStepMarketHub:
+    """TopStepX SignalR market data client with enhanced reliability."""
+    
+    def __init__(self, token: str):
+        self.client = TopStepXSignalRClient(token)
+        self.bar_aggregator = BarAggregator(bar_interval_minutes=5)
+        self.bar_callbacks = []
+        self.quote_callbacks = []
+        self.trade_callbacks = []
+        self.connection_callbacks = []  # New: connection status callbacks
+        self.latest_bars = {}
+        self.latest_quotes = {}
+        self.subscribed_contracts = set()
+        self._connected = False
+        
+    async def connect(self) -> bool:
+        """Connect to the market hub."""
+        # Register internal handlers
+        self.client.on("GatewayQuote", self._on_quote_received)
+        self.client.on("GatewayTrade", self._on_trade_received)
+        self.client.on("GatewayDepth", self._on_depth_received)
+        
+        # Connect
+        success = await self.client.connect()
+        
+        if success:
+            self._connected = True
+            # Start bar flush timer
+            asyncio.create_task(self._bar_timer())
+            
+            # Notify connection callbacks
+            for callback in self.connection_callbacks:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(True)
+                    else:
+                        callback(True)
+                except Exception as e:
+                    logger.error(f"Connection callback error: {e}")
+        else:
+            self._connected = False
+            
+        return success
+    
+    async def _bar_timer(self):
+        """Periodically check for completed bars and connection health."""
+        last_connection_state = self._connected
+        
+        while self.client.running:
+            await asyncio.sleep(10)
+            self.bar_aggregator.flush_completed_bars(self._on_bar_completed)
+            
+            # Check connection state changes
+            current_state = self.client.ws and self.client.ws.state.name == 'OPEN'
+            if current_state != last_connection_state:
+                self._connected = current_state
+                last_connection_state = current_state
+                
+                # Notify connection callbacks
+                for callback in self.connection_callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(current_state)
+                        else:
+                            callback(current_state)
+                    except Exception as e:
+                        logger.error(f"Connection callback error: {e}")
+    
+    def add_connection_callback(self, callback: Callable):
+        """Add a connection status callback."""
+        self.connection_callbacks.append(callback)
+    
+    @property
+    def is_connected(self) -> bool:
+        """Check if currently connected."""
+        return self._connected and self.client.running
+    
+    # ... rest of the methods remain the same ...
+    
+    async def _on_quote_received(self, contract_id: str, data):
+        """Handle quote data."""
+        if isinstance(data, list):
+            if data and isinstance(data[0], dict):
+                data = data[0]
+            else:
+                logger.warning(f"Unexpected quote format: {data}")
+                return
+        
+        self.latest_quotes[contract_id] = data
+        
+        if 'lastPrice' in data and data['lastPrice'] is not None:
+            synthetic_trade = {
+                'price': data['lastPrice'],
+                'volume': 0,
+                'timestamp': data.get('timestamp', datetime.now(timezone.utc).isoformat())
+            }
+            logger.debug(f"Processing synthetic trade from quote: price={synthetic_trade['price']}")
+            self.bar_aggregator.process_trade(contract_id, synthetic_trade, self._on_bar_completed)
+        
+        for callback in self.quote_callbacks:
+            try:
+                await callback(contract_id, data)
+            except Exception as e:
+                logger.error(f"Quote callback error: {e}")
+    
+    async def _on_trade_received(self, contract_id: str, data: dict):
+        """Handle trade data."""
+        self.bar_aggregator.process_trade(contract_id, data, self._on_bar_completed)
+        
+        for callback in self.trade_callbacks:
+            try:
+                await callback(contract_id, data)
+            except Exception as e:
+                logger.error(f"Trade callback error: {e}")
+    
+    async def _on_depth_received(self, contract_id: str, data: dict):
+        """Handle market depth data."""
+        pass
+    
+    def _on_bar_completed(self, bar_data: dict):
+        """Handle completed bar."""
+        contract_id = bar_data.get('contractId')
+        if contract_id:
+            self.latest_bars[contract_id] = bar_data
+            
+        for callback in self.bar_callbacks:
+            try:
+                callback(bar_data)
+            except Exception as e:
+                logger.error(f"Bar callback error: {e}")
+    
+    async def subscribe_contract(self, contract_id: str):
+        """Subscribe to contract data."""
+        self.subscribed_contracts.add(contract_id)
+        await self.client.subscribe_contract(contract_id)
+    
+    async def disconnect(self):
+        """Disconnect from the hub."""
+        await self.client.disconnect()
+    
+    def add_bar_callback(self, callback: Callable):
+        """Add a bar completion callback."""
+        self.bar_callbacks.append(callback)
+    
+    def add_quote_callback(self, callback: Callable):
+        """Add a quote callback."""
+        self.quote_callbacks.append(callback)
+    
+    def add_trade_callback(self, callback: Callable):
+        """Add a trade callback."""
+        self.trade_callbacks.append(callback)
+    
+    def get_latest_bar(self, contract_id: str) -> Optional[Dict]:
+        """Get latest bar for a contract."""
+        return self.latest_bars.get(contract_id)
+    
+    def get_latest_quote(self, contract_id: str) -> Optional[Dict]:
+        """Get latest quote for a contract."""
+        return self.latest_quotes.get(contract_id)
+
+
+# Keep BarAggregator class unchanged
 class BarAggregator:
     """Aggregates tick/trade data into time-based OHLCV bars."""
     
@@ -255,10 +493,19 @@ class BarAggregator:
                 if bars:
                     prev_bar_time = max(bars.keys())
                     if bar_time > prev_bar_time:
-                        completed_bar = bars[prev_bar_time]
-                        completed_bar['t'] = prev_bar_time.isoformat()
-                        completed_bar['contractId'] = contract_id
-                        callback(completed_bar)
+                        # Check if the bar is not too old
+                        current_time = datetime.now(timezone.utc)
+                        bar_age = (current_time - prev_bar_time).total_seconds()
+                        
+                        # Only emit bars that are less than 30 minutes old
+                        if bar_age < 1800:  # 30 minutes
+                            completed_bar = bars[prev_bar_time]
+                            completed_bar['t'] = prev_bar_time.isoformat()
+                            completed_bar['contractId'] = contract_id
+                            callback(completed_bar)
+                        else:
+                            logger.debug(f"Skipping stale bar from {prev_bar_time}")
+                        
                         del bars[prev_bar_time]
                 
                 # Start new bar
@@ -297,135 +544,6 @@ class BarAggregator:
                     callback(completed_bar)
                     del bars[bar_time]
 
-
-class TopStepMarketHub:
-    """TopStepX SignalR market data client for real-time streaming."""
-    
-    def __init__(self, token: str):
-        self.client = TopStepXSignalRClient(token)
-        self.bar_aggregator = BarAggregator(bar_interval_minutes=5)
-        self.bar_callbacks = []
-        self.quote_callbacks = []
-        self.trade_callbacks = []
-        self.latest_bars = {}
-        self.latest_quotes = {}
-        self.subscribed_contracts = set()
-        
-    async def connect(self) -> bool:
-        """Connect to the market hub."""
-        # Register internal handlers
-        self.client.on("GatewayQuote", self._on_quote_received)
-        self.client.on("GatewayTrade", self._on_trade_received)
-        self.client.on("GatewayDepth", self._on_depth_received)
-        
-        # Connect
-        success = await self.client.connect()
-        
-        if success:
-            # Start bar flush timer
-            asyncio.create_task(self._bar_timer())
-            
-        return success
-    
-    async def _bar_timer(self):
-        """Periodically check for completed bars."""
-        while self.client.running:
-            await asyncio.sleep(10)
-            self.bar_aggregator.flush_completed_bars(self._on_bar_completed)
-    
-    async def _on_quote_received(self, contract_id: str, data):
-        """Handle quote data."""
-        # Data might come as a list instead of dict
-        if isinstance(data, list):
-            # Extract the actual quote data from the list
-            if data and isinstance(data[0], dict):
-                data = data[0]
-            else:
-                logger.warning(f"Unexpected quote format: {data}")
-                return
-        
-        self.latest_quotes[contract_id] = data
-        
-        # Build bars from quotes if we have a last price
-        if 'lastPrice' in data and data['lastPrice'] is not None:
-            # Create a synthetic trade from the quote
-            synthetic_trade = {
-                'price': data['lastPrice'],
-                'volume': 0,  # Use volume if available, else 1
-                'timestamp': data.get('timestamp', datetime.now(timezone.utc).isoformat())
-            }
-            # Process as a trade for bar building
-            logger.debug(f"Processing synthetic trade from quote: price={synthetic_trade['price']}")
-            self.bar_aggregator.process_trade(contract_id, synthetic_trade, self._on_bar_completed)
-        
-        # Notify quote callbacks
-        for callback in self.quote_callbacks:
-            try:
-                await callback(contract_id, data)
-            except Exception as e:
-                logger.error(f"Quote callback error: {e}")
-    
-    async def _on_trade_received(self, contract_id: str, data: dict):
-        """Handle trade data."""
-        # Aggregate into bars
-        self.bar_aggregator.process_trade(contract_id, data, self._on_bar_completed)
-        
-        # Notify callbacks
-        for callback in self.trade_callbacks:
-            try:
-                await callback(contract_id, data)
-            except Exception as e:
-                logger.error(f"Trade callback error: {e}")
-    
-    async def _on_depth_received(self, contract_id: str, data: dict):
-        """Handle market depth data."""
-        pass  # Not used currently
-    
-    def _on_bar_completed(self, bar_data: dict):
-        """Handle completed bar."""
-        contract_id = bar_data.get('contractId')
-        if contract_id:
-            self.latest_bars[contract_id] = bar_data
-            
-        #logger.info(f"Bar completed: {bar_data}")
-        
-        # Notify callbacks
-        for callback in self.bar_callbacks:
-            try:
-                callback(bar_data)
-            except Exception as e:
-                logger.error(f"Bar callback error: {e}")
-    
-    async def subscribe_contract(self, contract_id: str):
-        """Subscribe to contract data."""
-        self.subscribed_contracts.add(contract_id)
-        await self.client.subscribe_contract(contract_id)
-    
-    async def disconnect(self):
-        """Disconnect from the hub."""
-        await self.client.disconnect()
-    
-    def add_bar_callback(self, callback: Callable):
-        """Add a bar completion callback."""
-        self.bar_callbacks.append(callback)
-    
-    def add_quote_callback(self, callback: Callable):
-        """Add a quote callback."""
-        self.quote_callbacks.append(callback)
-    
-    def add_trade_callback(self, callback: Callable):
-        """Add a trade callback."""
-        self.trade_callbacks.append(callback)
-    
-    def get_latest_bar(self, contract_id: str) -> Optional[Dict]:
-        """Get latest bar for a contract."""
-        return self.latest_bars.get(contract_id)
-    
-    def get_latest_quote(self, contract_id: str) -> Optional[Dict]:
-        """Get latest quote for a contract."""
-        return self.latest_quotes.get(contract_id)
-
-
 # Update the TopStepMarketDataManager class:
 
 class TopStepMarketDataManager:
@@ -442,7 +560,8 @@ class TopStepMarketDataManager:
         self._pending_callbacks = {
             'bar': [],
             'quote': [],
-            'trade': []
+            'trade': [],
+            'connection': []
         }
         
     def start(self, contract_id: str):
@@ -465,6 +584,8 @@ class TopStepMarketDataManager:
                     for callback in self._pending_callbacks['trade']:
                         self.market_hub.add_trade_callback(callback)
                     
+                    for cb in self._pending_callbacks['connection']:
+                        self.market_hub.add_connection_callback(cb)
                     # Connect first
                     logger.info("Attempting to connect...")
                     if await self.market_hub.connect():
@@ -484,13 +605,14 @@ class TopStepMarketDataManager:
                             self._connected_event.set()
                             logger.info("Market data manager ready and subscribed")
                             
-                            # Keep running with more frequent checks
-                            while self._running and self.market_hub.client.running:
-                                await asyncio.sleep(0.05)  # More responsive
-                                
-                            if not self.market_hub.client.running:
-                                logger.warning("WebSocket connection lost")
-                                self._running = False
+                            while self._running:
+                                if not self.market_hub.client.running:
+                                    logger.warning("WebSocket lost – reconnecting…")
+                                    # this will trigger the backoff loop above
+                                    await self.market_hub.client.connect()
+                                    # re-subscribe to your symbol
+                                    await self.market_hub.subscribe_contract(contract_id)
+                                await asyncio.sleep(0.05)
                         else:
                             logger.error("Connection lost after subscribe")
                             self._connected_event.set()
@@ -522,6 +644,18 @@ class TopStepMarketDataManager:
         else:
             raise RuntimeError("Connection timeout")
     
+    def add_connection_handler(self, callback: Callable[[bool], None]):
+        """
+        Register a callback to be invoked with a single bool argument:
+        True when connected, False when disconnected.
+        """
+        if self.market_hub:
+            # already built the async hub—attach immediately
+            self.market_hub.add_connection_callback(callback)
+        else:
+            # stash for when start() builds the hub
+            self._pending_callbacks['connection'].append(callback)
+
     @property
     def is_connected(self):
         """Check if the market hub is connected."""

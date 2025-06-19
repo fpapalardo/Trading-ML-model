@@ -449,12 +449,24 @@ class ProjectXClient:
         # Convert string to int if needed for REST API
         if isinstance(contract_id, str) and contract_id.isdigit():
             contract_id = int(contract_id)
+
+        payload = {
+            "accountId": self.account_id,
+            "contractId": contract_id,
+            "type": order_type,
+            "side": 0 if side.lower().startswith("buy") else 1,
+            "size": quantity,
+        }
         
         # Fast tick rounding
         if limit_price is not None:
-            limit_price = round(limit_price * 4) * 0.25
+            payload["limitPrice"] = round(limit_price * 4) * 0.25
         if stop_price is not None:
-            stop_price = round(stop_price * 4) * 0.25
+            payload["stopPrice"] = round(stop_price * 4) * 0.25
+        if trail_price is not None:
+            payload["trailPrice"] = trail_price
+        if linked_order_id is not None:
+            payload["linkedOrderId"] = linked_order_id
 
         payload = {
             "accountId": self.account_id,
