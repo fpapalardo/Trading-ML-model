@@ -92,3 +92,6 @@ venv/
 
 # --- Egg info ---
 trading_ml.egg-info/
+
+# --- Exploration ---
+exploration/
