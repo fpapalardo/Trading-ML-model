@@ -17,7 +17,8 @@ def tune_xgboost_regressor(
     splits: int = 4,
     n_trials: int = 50,
     db_dir: str = "notebooks/dbs",
-    unique_id: str = None
+    unique_id: str = None,
+    n_jobs: int = -1
 ) -> dict:
     """
     Optimize XGBRegressor via TS-split CV and training-set RMSE blend.
@@ -43,13 +44,13 @@ def tune_xgboost_regressor(
         for tr_idx, val_idx in tscv.split(X_train):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
             y_tr, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
-            model = XGBRegressor(**params, random_state=42, n_jobs=-1)
+            model = XGBRegressor(**params, random_state=42, n_jobs=n_jobs)
             model.fit(X_tr, y_tr)
             preds = model.predict(X_val)
             rmse = np.sqrt(mean_squared_error(y_val, preds))
             cv_scores.append(rmse)
         cv_mean = np.mean(cv_scores)
-        final = XGBRegressor(**params, random_state=42, n_jobs=-1)
+        final = XGBRegressor(**params, random_state=42, n_jobs=n_jobs)
         final.fit(X_train, y_train)
         train_rmse = np.sqrt(mean_squared_error(y_train, final.predict(X_train)))
         score = 0.8 * cv_mean + 0.2 * train_rmse
@@ -75,7 +76,8 @@ def tune_lgbm_regressor(
     splits: int = 4,
     n_trials: int = 50,
     db_dir: str = "notebooks/dbs",
-    unique_id: str = None
+    unique_id: str = None,
+    n_jobs: int = -1
 ) -> dict:
     """
     Optimize LGBMRegressor via TS-split CV and training-set RMSE blend.
@@ -102,12 +104,12 @@ def tune_lgbm_regressor(
         for tr_idx, val_idx in tscv.split(X_train):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
             y_tr, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
-            model = LGBMRegressor(**params, random_state=42, n_jobs=-1)
+            model = LGBMRegressor(**params, random_state=42, n_jobs=n_jobs)
             model.fit(X_tr, y_tr)
             preds = model.predict(X_val)
             cv_scores.append(np.sqrt(mean_squared_error(y_val, preds)))
         cv_mean = np.mean(cv_scores)
-        final = LGBMRegressor(**params, random_state=42, n_jobs=-1)
+        final = LGBMRegressor(**params, random_state=42, n_jobs=n_jobs)
         final.fit(X_train, y_train)
         train_rmse = np.sqrt(mean_squared_error(y_train, final.predict(X_train)))
         score = 0.8 * cv_mean + 0.2 * train_rmse
@@ -133,7 +135,8 @@ def tune_rf_regressor(
     splits: int = 4,
     n_trials: int = 50,
     db_dir: str = "notebooks/dbs",
-    unique_id: str = None
+    unique_id: str = None,
+    n_jobs: int = -1
 ) -> dict:
     """
     Optimize RandomForestRegressor via TS-split CV and training-set RMSE blend.
@@ -156,12 +159,12 @@ def tune_rf_regressor(
         for tr_idx, val_idx in tscv.split(X_train):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
             y_tr, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
-            model = RandomForestRegressor(**params, random_state=42, n_jobs=-1)
+            model = RandomForestRegressor(**params, random_state=42, n_jobs=n_jobs)
             model.fit(X_tr, y_tr)
             preds = model.predict(X_val)
             cv_scores.append(np.sqrt(mean_squared_error(y_val, preds)))
         cv_mean = np.mean(cv_scores)
-        final = RandomForestRegressor(**params, random_state=42, n_jobs=-1)
+        final = RandomForestRegressor(**params, random_state=42, n_jobs=n_jobs)
         final.fit(X_train, y_train)
         train_rmse = np.sqrt(mean_squared_error(y_train, final.predict(X_train)))
         score = 0.8 * cv_mean + 0.2 * train_rmse

@@ -16,7 +16,8 @@ def tune_xgboost(
     X_train, y_train,
     market: str,
     n_trials: int = 50,
-    unique_id: str = None
+    unique_id: str = None,
+    n_jobs: int = -1
 ) -> dict:
     """
     Optimize an XGBClassifier using weighted CV and training-set F1 (80/20).
@@ -46,12 +47,12 @@ def tune_xgboost(
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
             y_tr, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
             weights = compute_sample_weight(class_weight='balanced', y=y_tr)
-            model = XGBClassifier(**params, random_state=42, n_jobs=-1)
+            model = XGBClassifier(**params, random_state=42, n_jobs=n_jobs)
             model.fit(X_tr, y_tr, sample_weight=weights)
             preds = model.predict(X_val)
             cv_scores.append(f1_score(y_val, preds, average='macro'))
         cv_mean = np.mean(cv_scores)
-        final = XGBClassifier(**params, random_state=42, n_jobs=-1)
+        final = XGBClassifier(**params, random_state=42, n_jobs=n_jobs)
         final.fit(X_train, y_train)
         train_f1 = f1_score(y_train, final.predict(X_train), average='macro')
         score = 0.8 * cv_mean + 0.2 * train_f1
@@ -70,7 +71,8 @@ def tune_lgbm(
     X_train, y_train,
     market: str,
     n_trials: int = 50,
-    unique_id: str = None
+    unique_id: str = None,
+    n_jobs: int = -1
 ) -> dict:
     """
     Optimize an LGBMClassifier using weighted CV and training-set F1 (80/20).
@@ -94,7 +96,7 @@ def tune_lgbm(
             'objective': 'multiclass',
             'num_class': len(np.unique(y_train)),
             'random_state': 42,
-            'n_jobs': -1,
+            'n_jobs': n_jobs,
             'verbosity': -1
         }
         tscv = auto_ts_split(len(y_train))
@@ -127,7 +129,8 @@ def tune_rf(
     X_train, y_train,
     market: str,
     n_trials: int = 50,
-    unique_id: str = None
+    unique_id: str = None,
+    n_jobs: int = -1
 ) -> dict:
     """
     Optimize RandomForestClassifier using cross-val + OOB blend.
@@ -150,10 +153,10 @@ def tune_rf(
             'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy'])
         }
         tscv = auto_ts_split(len(y_train))
-        model = RandomForestClassifier(**params, random_state=42, n_jobs=-1)
+        model = RandomForestClassifier(**params, random_state=42, n_jobs=n_jobs)
         cv_scores = cross_val_score(
             model, X_train, y_train,
-            cv=tscv, scoring='f1_macro', n_jobs=-1
+            cv=tscv, scoring='f1_macro', n_jobs=n_jobs
         )
         model.fit(X_train, y_train)
         oob = model.oob_score_
