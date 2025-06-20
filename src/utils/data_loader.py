@@ -32,8 +32,8 @@ def load_local_csv(csv_path: Path, tz: ZoneInfo = NY_TZ) -> pd.DataFrame:
 def resample_bars(
     df: pd.DataFrame,
     rule: str,
-    closed: str = 'right',
-    label: str  = 'right'
+    closed: str = 'left',
+    label: str  = 'left'
 ) -> pd.DataFrame:
     """
     Generic OHLCV resampler using a dict for .agg() to avoid the 'func' error.

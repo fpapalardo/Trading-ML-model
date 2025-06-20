@@ -43,7 +43,6 @@ def load_databento_data(
 
     return df[['open','high','low','close','volume','symbol']]
 
-
 def check_market_inconsistencies(
     df: pd.DataFrame
 ) -> None:
