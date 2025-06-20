@@ -99,3 +99,6 @@ trading_ml.egg-info/
 
 # --- Exploration ---
 exploration/
+
+# --- Trading Logs ---
+src/trading/**/logs
