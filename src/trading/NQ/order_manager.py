@@ -17,6 +17,7 @@ from enum import Enum
 from datetime import timezone, timedelta
 
 from projectx_connector import ProjectXClient
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,9 @@ class OrderManager:
         self._running = False
         self._monitor_thread = None
         self._lock = threading.Lock()
+
+        # Record when we started watching orders
+        self.startup_time = datetime.now(timezone.utc)
         
         # Callbacks
         self.on_order_filled = None
@@ -190,6 +194,15 @@ class OrderManager:
         Check status of an order group and handle OCO logic.
         Modified to prevent false cancellations.
         """
+        # Skip groups created before manager started
+        if group.created_at < self.startup_time:
+            return
+            
+        # Skip recently created groups to avoid false positives
+        order_age = (datetime.now(timezone.utc) - group.created_at).total_seconds()
+        if order_age < 60:  # Wait 60 seconds to ensure order is in system
+            return
+            
         # Check if we already know the status from real-time updates
         entry_status = self.known_statuses.get(group.entry_order_id)
         

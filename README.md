@@ -1,5 +1,4 @@
 # Advanced Trading ML Model
-# (OUTDATED)
 ## 🛠 Prerequisites
 
 - python 3.12.10
