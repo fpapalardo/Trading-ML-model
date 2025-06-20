@@ -36,6 +36,10 @@ notebooks/*.pkl
 notebooks/*.db
 notebooks/*.json
 notebooks/*.log
+notebooks/reporting/
+notebooks/research/NQ
+notebooks/research/notebooks_metadata
+!notebooks/research/example.ipynb
 
 .ipynb_checkpoints/
 
