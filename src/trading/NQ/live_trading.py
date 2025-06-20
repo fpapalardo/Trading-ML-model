@@ -126,7 +126,7 @@ class EnhancedTradingState:
                 FUTURES["topstep"]["username"], 
                 FUTURES["topstep"]["api_key"]
             )
-            self.px.authenticate(preferred_account_name="PRAC-V2-68606-82179008")
+            self.px.authenticate(preferred_account_name="PRAC-V2-68606-63028810")
             
             # Find contract
             if CONTRACT_ID is None:
@@ -355,40 +355,43 @@ class EnhancedTradingState:
     def _on_user_order_update(self, *args):
         """Handle real-time order updates from SignalR with flexible arguments."""
         try:
-            # Handle both (account_id, order_data) and just (order_data) formats
-            if len(args) == 2:
-                account_id, order_data = args
-            elif len(args) == 1:
-                order_data = args[0]
-                account_id = self.px.account_id
-            else:
-                print(f"[ERROR] Unexpected args for order update: {len(args)} args")
+            raw = args[-1]  
+            if not isinstance(raw, dict) or "data" not in raw:
                 return
-                
-            order_id = order_data.get('id') or order_data.get('orderId')
-            status = order_data.get('status')
             
-            # Log the update
-            status_name = {
+            order = raw["data"]
+            order_id = order.get("id")
+            status   = order.get("status")
+
+            if order_id is None or status is None:
+                # still log it so you can inspect
+                print("Order update missing id or status:", raw)
+                return
+            
+            # map the TopstepX codes correctly:
+            status_names = {
+                1: "Confirmed",
+                2: "Filled",
+                3: "Cancelled",
+                6: "New/Open",
+                # Rest are Unknown
                 0: "Working",
-                1: "Filled", 
-                2: "Cancelled",
-                3: "Expired",
-                4: "Rejected"
-            }.get(status, "Unknown")
+                4: "Expired",
+                5: "Rejected",
+            }
+            human = status_names.get(status, f"Unknown({status})")
+            print(f"[ORDER UPDATE] Order {order_id}: {human}")
             
-            print(f"[ORDER UPDATE] Order {order_id}: {status_name}")
-            
-            # Update order manager's view of order status
-            if hasattr(self.order_manager, '_handle_realtime_order_update'):
-                self.order_manager._handle_realtime_order_update(order_id, status, order_data)
-                
-            # Send notification for fills
-            if status == 1 and self.telegram_notifier:  # Filled
-                side = "BUY" if order_data.get('side') == 0 else "SELL"
-                price = order_data.get('averageFillPrice', order_data.get('price', 0))
-                qty = order_data.get('filledSize', order_data.get('size', 0))
+            # 4) Send a Telegram notification on fill only
+            if status == 2 and self.telegram_notifier:
+                side = "BUY" if order.get("side") == 0 else "SELL"
+                # TopstepX uses fillVolume for qty, and averageFillPrice for fill price
+                price = order.get("averageFillPrice", order.get("limitPrice", 0))
+                qty   = order.get("fillVolume", order.get("size", 0))
                 self.telegram_notifier.send_order_fill(order_id, side, price, qty)
+
+            # 5) Finally hand off to your OrderManager
+            self.order_manager._handle_realtime_order_update(order_id, status, order)
                 
         except Exception as e:
             print(f"[ERROR] Failed to process order update: {e}")
@@ -412,6 +415,11 @@ class EnhancedTradingState:
             
             if qty != 0:
                 print(f"[POSITION] {contract}: {qty} @ {avg_price:.2f}, PnL: ${pnl:.2f}")
+            
+            # Send position update to Telegram
+            if self.telegram_notifier:
+                self.telegram_notifier.send_position_update(contract, qty, avg_price, pnl)
+                
         except Exception as e:
             print(f"[ERROR] Failed to process position update: {e}")
             
@@ -546,31 +554,31 @@ class EnhancedTradingState:
         print(f"Entering at {price:.2f} with SL {sl_price:.2f} and TP {tp_price:.2f}")
 
         # Place bracket order with OCO management
-        # try:
-        #     order_group = place_bracket_order(
-        #         self.px,
-        #         self.order_manager,
-        #         CONTRACT_ID,
-        #         side,
-        #         CONTRACTS_PER_TRADE,
-        #         tp_price,
-        #         sl_price
-        #     )
+        try:
+            order_group = place_bracket_order(
+                self.px,
+                self.order_manager,
+                CONTRACT_ID,
+                side,
+                CONTRACTS_PER_TRADE,
+                tp_price,
+                sl_price
+            )
             
-        #     if order_group:
-        #         print(f"[{now}] {side} bracket order placed @ {price:.2f}")
-        #         print(f"  TP: {tp_price:.2f} (+{abs(tp_price - price):.2f} pts)")
-        #         print(f"  SL: {sl_price:.2f} (-{abs(sl_price - price):.2f} pts)")
-        #         print(f"  Order IDs: Entry={order_group.entry_order_id}, TP={order_group.tp_order_id}, SL={order_group.sl_order_id}")
-        #     else:
-        #         print(f"[ERROR] Failed to place bracket order")
+            if order_group:
+                print(f"[{now}] {side} bracket order placed @ {price:.2f}")
+                print(f"  TP: {tp_price:.2f} (+{abs(tp_price - price):.2f} pts)")
+                print(f"  SL: {sl_price:.2f} (-{abs(sl_price - price):.2f} pts)")
+                print(f"  Order IDs: Entry={order_group.entry_order_id}, TP={order_group.tp_order_id}, SL={order_group.sl_order_id}")
+            else:
+                print(f"[ERROR] Failed to place bracket order")
                 
-        # except Exception as e:
-        #     print(f"[ERROR] Order placement failed: {e}")
-        #     traceback.print_exc()
+        except Exception as e:
+            print(f"[ERROR] Order placement failed: {e}")
+            traceback.print_exc()
             
-        #     if self.telegram_notifier:
-        #         self.telegram_notifier.send_error(str(e), "Order Placement")
+            if self.telegram_notifier:
+                self.telegram_notifier.send_error(str(e), "Order Placement")
 
     def check_connections_health(self):
         """Check health of all connections."""
@@ -802,12 +810,19 @@ def main():
                         
                         # Send market update to Telegram
                         if state.telegram_notifier and bid != 'N/A' and ask != 'N/A':
-                            try:
-                                state.telegram_notifier.send_market_update(
-                                    float(bid), float(ask), float(quote.get('lastPrice', 0))
-                                )
-                            except ValueError:
-                                pass
+                            now = datetime.now(timezone.utc)
+                            last = getattr(state, "last_market_update", None)
+                            # only send if we’ve never sent before, or it's been ≥ 30m
+                            if last is None or (now - last) >= timedelta(minutes=30):
+                                try:
+                                    state.telegram_notifier.send_market_update(
+                                        float(bid),
+                                        float(ask),
+                                        float(quote.get("lastPrice", 0))
+                                    )
+                                    state.last_market_update = now
+                                except ValueError:
+                                    pass
                 else:
                     print(f"[{datetime.now(NY_TZ):%H:%M:%S}] Heartbeat: Disconnected - attempting reconnection...")
                 

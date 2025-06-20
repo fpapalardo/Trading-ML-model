@@ -458,27 +458,15 @@ class ProjectXClient:
             "size": quantity,
         }
         
-        # Fast tick rounding
+        # Add optional parameters
         if limit_price is not None:
-            payload["limitPrice"] = round(limit_price * 4) * 0.25
+            payload["limitPrice"] = limit_price
         if stop_price is not None:
-            payload["stopPrice"] = round(stop_price * 4) * 0.25
+            payload["stopPrice"] = stop_price
         if trail_price is not None:
             payload["trailPrice"] = trail_price
         if linked_order_id is not None:
             payload["linkedOrderId"] = linked_order_id
-
-        payload = {
-            "accountId": self.account_id,
-            "contractId": contract_id,
-            "type": order_type,
-            "side": 0 if side.lower().startswith("buy") else 1,
-            "size": quantity,
-            "limitPrice": limit_price,
-            "stopPrice": stop_price,
-            "trailPrice": trail_price,
-            "linkedOrderId": linked_order_id,
-        }
 
         logger.info("Placing order: %s %d @ limit=%s stop=%s", 
                    side, quantity, limit_price, stop_price)
