@@ -4,6 +4,8 @@ from sklearn.metrics import mean_squared_error
 from sklearn.base import clone
 from sklearn.model_selection import TimeSeriesSplit
 from datetime import timedelta
+import joblib
+from config import MODEL_DIR
 
 def check_overfit(model, X_tr, X_te, y_tr, y_te):
     train_preds = model.predict(X_tr)
@@ -172,3 +174,5 @@ def generate_oof_lstm_classifier(model_class, X_seq, y, splits=4, num_classes=No
 
     return pd.Series(oof_preds, index=np.arange(len(X_seq)))
 
+def save_model_pkl(model, type, market, lookahead, version):
+    joblib.dump(model, f"{MODEL_DIR}/{type}/{market}/lookahead{lookahead}_{version}.pkl")
