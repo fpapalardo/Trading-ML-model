@@ -81,6 +81,7 @@ tests/__pycache__/
 # --- Secrets/Config ---
 .env
 .env.*
+!.env.example
 *.secret
 *.key
 *.pem
