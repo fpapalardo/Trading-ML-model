@@ -1,16 +1,19 @@
 import numpy as np
 import optuna
 
+import pandas as pd
+
 from optimization.common import auto_ts_split, create_study, get_storage_uri, blend_scores
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score, cross_validate
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils import compute_sample_weight, compute_class_weight
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, make_scorer, fbeta_score
 from xgboost import XGBClassifier
 import lightgbm as lgb
 from catboost import CatBoostClassifier
 from sklearn.linear_model import LogisticRegression
 from config import DB_DIR
+from utils.backtest import evaluate_classification
 
 def tune_xgboost(
     X_train, y_train,
@@ -127,6 +130,7 @@ def tune_lgbm(
 
 def tune_rf(
     X_train, y_train,
+    labeled,
     market: str,
     n_trials: int = 50,
     unique_id: str = None,
@@ -139,31 +143,147 @@ def tune_rf(
     if unique_id:
         study_name += f"_{unique_id}"
 
+    if not isinstance(labeled.index, pd.DatetimeIndex):
+        if "datetime" in labeled.columns:
+            labeled = labeled.set_index("datetime")
+        else:
+            raise ValueError("No 'datetime' column to set as index!")
+    if labeled.index.tz is None:
+        labeled = labeled.tz_localize("UTC")
+    labeled = labeled.tz_convert("America/New_York")
+    # fbeta_scorer = make_scorer(
+    #     fbeta_score,
+    #     beta=2,               # example: β=2 emphasizes recall twice as much as precision
+    #     average='binary'      # or 'macro' if you have multiple classes
+    # )
+
     def objective(trial):
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 200, 1000, step=100),
-            'max_depth': trial.suggest_int('max_depth', 5, 15),
-            'max_leaf_nodes': trial.suggest_int('max_leaf_nodes', 100, 300, step=50),
-            'min_samples_split': trial.suggest_int('min_samples_split', 10, 100, step=10),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 5, 50, step=5),
-            'max_features': trial.suggest_categorical('max_features', ['sqrt', 0.2, 0.5, 0.8]),
+            'n_estimators': trial.suggest_int('n_estimators', 200, 5000, step=100),
+            'max_depth': trial.suggest_int('max_depth', 5, 50),
+            'max_leaf_nodes': trial.suggest_int('max_leaf_nodes', 50, 1000, step=50),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 200, step=2),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20, step=1),
+            'max_features': trial.suggest_categorical('max_features', ['sqrt', 0.1, 0.2, 0.5, 0.8, 1.0]),
             'bootstrap': True,
-            'oob_score': True,
+            'oob_score': False,
             'class_weight': trial.suggest_categorical('class_weight', [None, 'balanced']),
             'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy'])
         }
+        # F1 --->
+        # tscv = auto_ts_split(len(y_train))
+        # model = RandomForestClassifier(**params, random_state=42, n_jobs=n_jobs)
+        # cv_scores = cross_val_score(
+        #     model, X_train, y_train,
+        #     cv=tscv, scoring='f1_macro', n_jobs=n_jobs
+        # )
+        # model.fit(X_train, y_train)
+        # oob = model.oob_score_
+        # score = 0.8 * cv_scores.mean() + 0.2 * oob
+        # trial.set_user_attr('cv_mean', cv_scores.mean())
+        # trial.set_user_attr('oob_score', oob)
+        # return score
+        # F1 <---
+
+        # Gemini --->
         tscv = auto_ts_split(len(y_train))
-        model = RandomForestClassifier(**params, random_state=42, n_jobs=n_jobs)
-        cv_scores = cross_val_score(
-            model, X_train, y_train,
-            cv=tscv, scoring='f1_macro', n_jobs=n_jobs
-        )
-        model.fit(X_train, y_train)
-        oob = model.oob_score_
-        score = 0.8 * cv_scores.mean() + 0.2 * oob
-        trial.set_user_attr('cv_mean', cv_scores.mean())
-        trial.set_user_attr('oob_score', oob)
+    
+        fold_scores = []
+        fold_profit_factors = []
+        fold_num_trades = []
+
+        for train_idx, val_idx in tscv.split(X_train):
+            X_train_fold, X_val_fold = X_train.iloc[train_idx], X_train.iloc[val_idx]
+            y_train_fold, y_val_fold = y_train.iloc[train_idx], y_train.iloc[val_idx]
+
+            model = RandomForestClassifier(**params, random_state=42, n_jobs=n_jobs)
+            model.fit(X_train_fold, y_train_fold)
+
+            # predictions = model.predict_proba(X_val_fold)
+            predictions   = model.predict(X_val_fold)
+            # turn [0,1,2]-labels into a one-hot array of shape (n,3)
+            backtest_results = evaluate_classification(X_val_fold, 
+                                                        predictions, 
+                                                        labeled, {}, TRAIL_START_MULT=0,
+                                                        TRAIL_STOP_MULT=0,
+                                                        TICK_VALUE=6)
+            
+            profit_factor = backtest_results.get('profit_factor', 0)
+            num_trades = backtest_results.get('trades', 0)
+            print(f"Profit factor this fold {profit_factor}, with {num_trades} trades")
+
+            if num_trades == 0:
+                fold_scores.append(0.0)
+                continue
+
+            # Store metrics for later analysis
+            fold_profit_factors.append(profit_factor)
+            fold_num_trades.append(num_trades)
+
+            # Handle edge case: profit_factor can be infinite if there are no losing trades.
+            # This is great, but can break the optimizer. We cap it at a high value.
+            if np.isinf(profit_factor):
+                profit_factor = 100 # A high, but finite number
+
+            # Calculate the score for this fold
+            score = profit_factor * np.log1p(num_trades)
+            fold_scores.append(score)
+
+        score = np.mean(fold_scores)
+
+        trial.set_user_attr('mean_profit_factor', np.mean(fold_profit_factors))
+        trial.set_user_attr('mean_num_trades', np.mean(fold_num_trades))
+
         return score
+        # Gemini <---
+
+        # # Pareto --->
+        # model = RandomForestClassifier(**params, random_state=42, n_jobs=-1)
+
+        # # 2. run cross‐validation, capturing both precision (win‐rate) and recall (trade rate)
+        # scoring = {
+        #     'precision': 'precision_macro',  
+        #     'recall':    'recall_macro'      
+        # }
+        # cv_results = cross_validate(
+        #     model, X_train, y_train,
+        #     cv=auto_ts_split(len(y_train)),
+        #     scoring=scoring,
+        #     n_jobs=-1
+        # )
+
+        # precision_mean = cv_results['test_precision'].mean()
+        # recall_mean    = cv_results['test_recall'].mean()
+
+        # # 3. record for later inspection
+        # trial.set_user_attr('precision', precision_mean)
+        # trial.set_user_attr('recall',    recall_mean)
+
+        # # 4. return a tuple of two objectives
+        # return precision_mean, recall_mean
+        # # Pareto <---
+        #FB 
+        # model = RandomForestClassifier(**params, random_state=42, n_jobs=-1)
+
+        # # CV on Fβ‐score directly
+        # cv_scores = cross_val_score(
+        #     model, X_train, y_train,
+        #     cv=auto_ts_split(len(y_train)),
+        #     scoring=fbeta_scorer,
+        #     n_jobs=-1,
+        #     error_score=0.0
+        # )
+
+        # # Optionally combine with OOB if you like:
+        # model.fit(X_train, y_train)
+        # oob = model.oob_score_
+
+        # # e.g. weight CV-Fβ 80% and OOB 20%
+        # combined = 0.8 * cv_scores.mean() + 0.2 * oob
+
+        # trial.set_user_attr('cv_fbeta_mean', cv_scores.mean())
+        # trial.set_user_attr('oob_score',      oob)
+        # return combined
 
     study = create_study(
         study_name=study_name,

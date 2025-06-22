@@ -361,11 +361,10 @@ def evaluate_classification(
 
     X_test_idx = X_test.index.to_list()
     # === Combine predicted probabilities ===
-    preds_class = np.argmax(preds_stack, axis=1)  # values in {0,1,2}
-    conf_scores = np.max(preds_stack, axis=1)
-    position_sizes = np.round(
-        base_contracts + (max_contracts - base_contracts) * conf_scores, 2
-    )
+    #conf_scores = np.max(preds_stack, axis=1)
+    # position_sizes = np.round(
+    #     base_contracts + (max_contracts - base_contracts) * conf_scores, 2
+    # )
 
     i = 0
     while i < len(X_test_idx):
@@ -381,8 +380,8 @@ def evaluate_classification(
         row       = labeled.iloc[idx_loc]             # bar N (features + actual reg targets)
         entry_row = labeled.iloc[idx_loc + 1]         # bar N+1 (where we actually enter)
 
-        pred        = preds_class[i]
-        size         = position_sizes[i]
+        pred        = preds_stack[i]
+        size         = base_contracts
 
         # Decide direction
         if pred == 1:
@@ -429,12 +428,12 @@ def evaluate_classification(
         tp_move = tp_mult * atr
 
         # enforce a minimum TP of 0.5% of entry_price
-        min_tp = 0.005 * entry_price
-        tp_move = np.clip(tp_move, min_tp, tp_move)
+        # min_tp = 0.005 * entry_price
+        # tp_move = np.clip(tp_move, min_tp, tp_move)
 
         # if your SL distance is bigger than TP, shrink SL to TP
-        if sl_move > tp_move:
-            sl_move = tp_move
+        # if sl_move > tp_move:
+        #     sl_move = tp_move
 
         tp_price = entry_price + tp_move if side == 'long' else entry_price - tp_move
         sl_price = entry_price - sl_move  if side == 'long' else entry_price + sl_move

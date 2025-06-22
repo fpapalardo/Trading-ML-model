@@ -22,6 +22,7 @@ from collections import deque
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import pytz
+from typing import Optional
 
 import joblib
 import pandas as pd
@@ -57,7 +58,7 @@ TICK_SIZE = 0.25  # Minimum price increment
 CONTRACTS_PER_TRADE = 3  # Number of contracts to trade
 
 # Model Settings
-MODEL_FILE = "rf_model_classifier_LOOKAHEAD_6_session_less.pkl"
+MODEL_FILE = "model/lookahead6_02.pkl"
 FEATURE_COLUMNS = [
     'POC_Dist_Current_Points_1h', 'POC_Dist_Current_Points_5min', 'Day_of_Week', 
     'POC_Dist_Current_Points_15min', 'Day_Sin', 'RSI_7_5min', 'Minus_DI_14_1h', 
@@ -102,6 +103,7 @@ class EnhancedTradingState:
         
         # Thread safety
         self.processing_lock = threading.Lock()
+        self.current_position: Optional[dict] = None
         
         # System state
         self.is_initialized = False
@@ -214,6 +216,19 @@ class EnhancedTradingState:
             if self.telegram_notifier:
                 setup_telegram_notifications(self.telegram_notifier, self, self.order_manager)
                 print("OK Telegram notifications: Enabled")
+                # ── every 15m while in a trade, ping position ─────────────────────────
+                def periodic_pnl_ping():
+                    while True:
+                        time.sleep(15 * 60)
+                        pos = self.current_position
+                        if pos and pos.get('netQuantity', 0) != 0:
+                            self.telegram_notifier.send_position_update(
+                                pos.get('contractName', 'Unknown'),
+                                pos.get('netQuantity', 0),
+                                pos.get('averagePrice', 0),
+                                pos.get('unrealizedPnL', 0)
+                            )
+                threading.Thread(target=periodic_pnl_ping, daemon=True).start()
             else:
                 print("X Telegram notifications: Disabled (no config found)")
             
@@ -388,7 +403,7 @@ class EnhancedTradingState:
                 # TopstepX uses fillVolume for qty, and averageFillPrice for fill price
                 price = order.get("averageFillPrice", order.get("limitPrice", 0))
                 qty   = order.get("fillVolume", order.get("size", 0))
-                self.telegram_notifier.send_order_fill(order_id, side, price, qty)
+                self.telegram_notifier.send_order_filled(order_id, side, price, qty)
 
             # 5) Finally hand off to your OrderManager
             self.order_manager._handle_realtime_order_update(order_id, status, order)
@@ -415,6 +430,8 @@ class EnhancedTradingState:
             
             if qty != 0:
                 print(f"[POSITION] {contract}: {qty} @ {avg_price:.2f}, PnL: ${pnl:.2f}")
+                # remember for periodic updates
+                self.current_position = position_data
             
             # Send position update to Telegram
             if self.telegram_notifier:
@@ -742,13 +759,22 @@ def main():
         print(f"OK Order manager: Running")
         print("\nWaiting for market data...\n")
 
+        # ─── Start the Rich dashboard ─────────────────────────────────────────────
         from trading_monitor_v2 import TradingMonitor
+
         monitor = TradingMonitor(
             state.px,
             state.px.account_id,
             order_manager=state.order_manager
         )
-        threading.Thread(target=monitor.run, daemon=True).start()
+        dashboard_thread = threading.Thread(
+            target=monitor.run,
+            name="DashboardThread",
+            daemon=True
+        )
+        dashboard_thread.start()
+        print("📊  Rich dashboard started in background thread")
+        # ─────────────────────────────────────────────────────────────────────────
         
         # Show initial market quote
         time.sleep(2)
