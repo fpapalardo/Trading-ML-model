@@ -14,7 +14,7 @@ TRADING_SYMBOL = 'BTCUSDT'
 TIMEFRAME = '5m'
 LEVERAGE = 40.0
 
-# Last Time 
+# Last Time 1340
 
 # --- Position Sizing and Risk Management (from your backtest) ---
 # This is used as the fraction of the balance to allocate to a position's margin
