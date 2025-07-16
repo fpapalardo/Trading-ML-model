@@ -1,4 +1,4 @@
-# Advanced Trading ML Model
+# Advanced Trading ML Model (Outdated)
 ## 🛠 Prerequisites
 
 - python 3.12.10
@@ -172,4 +172,4 @@ Contributions, bug reports, and feature requests are welcome! Please see [CONTRI
 
 📧 **Contact**  
 - **Name:** Franco Papalardo
-- **GitHub:** [francopapalardo](https://github.com/francopapalardo)
+- **GitHub:** [fpapalardo](https://github.com/fpapalardo)
