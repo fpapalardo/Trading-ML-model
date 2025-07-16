@@ -2,8 +2,8 @@
 
 # --- Exchange and API Settings ---
 # Important: Use a separate file like .env for production or gitignored file
-BINANCE_API_KEY = "3yC0OsSL2zJvkb4kBolLWU8gwoQNpTLjREdFSWSUlwCtG82Aru6mUmfN45SIuCko"
-BINANCE_API_SECRET = "ITkcJf79GJhMJuzvpU88yRgqy5c0QThpA9ggjDuRZuIn5gUqRHE6PdXFOScfoeRG"
+BINANCE_API_KEY = ""
+BINANCE_API_SECRET = ""
 
 # --- Trading Mode ---
 # Set to True for paper trading, False for live trading with real money
