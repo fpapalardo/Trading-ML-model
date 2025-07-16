@@ -11,7 +11,7 @@ DEFAULT_SEED = 42
 PRUNER_STARTUP_TRIALS = 5
 CV_TRAIN_BLEND = (0.8, 0.2)  # (CV score weight, train score weight)
 DEFAULT_MIN_TEST_SIZE = 1   # minimum test fold size when auto-calculating splits
-DEFAULT_MAX_SPLITS = 3      # upper cap on splits if auto-calculating
+DEFAULT_MAX_SPLITS = 4      # upper cap on splits if auto-calculating
 
 
 def ensure_db_dir(db_dir: Path = DEFAULT_DB_DIR):

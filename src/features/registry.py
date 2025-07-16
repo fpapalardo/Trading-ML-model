@@ -18,9 +18,10 @@ from .trend         import (
     add_market_regime_features,
 )
 from .volume        import (
-    add_obv, volume_spike, donchian_dist,
+    add_obv, add_obv_relative_features, volume_spike, donchian_dist,
     volume_delta_features, volume_zscore_features,
-    add_volume_features, add_volume_trend
+    add_volume_features, add_volume_trend,
+    add_obv_session_based
 )
 from .volume_stats  import (
     add_volume_delta_rollsum, add_cvd, add_wick_percent, add_rel_volume,
@@ -74,6 +75,8 @@ FEATURE_FUNCTIONS = {
 
     # Volume
     'obv':              add_obv,
+    'obv_session':      add_obv_session_based, 
+    'obv_relative':     add_obv_relative_features,
     'volume_spike':     volume_spike,
     'donchian_dist':    donchian_dist,
     'volume_delta':     volume_delta_features,

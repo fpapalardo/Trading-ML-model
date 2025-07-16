@@ -9,19 +9,36 @@ def session_id(df):
     return df
 
 def session_range(df):
-    """Append session range and price_vs_session_range."""
+    """
+    Append session range and price_vs_session_range without lookahead bias.
+    """
+    df = df.copy()
     d_str = df.index.normalize().strftime('%Y-%m-%d')
     hr = df.index.hour
+    
+    # Create a key for each session (e.g., 'asia_2025-07-06')
     sess = pd.Series(np.select(
-        [(hr<6),(hr<13),(hr<20)],
-        ['asia','london','new_york'],
+        [(hr < 6), (hr < 13), (hr < 20)],
+        ['asia', 'london', 'new_york'],
         default='overnight'
     ), index=df.index)
-    key = sess+'_'+d_str
-    hi = df.groupby(key)['high'].transform('max')
-    lo = df.groupby(key)['low'].transform('min')
-    df['Price_vs_Sess'] = (df['close']-lo)/(hi-lo+1e-6)
-    df['session']=sess
+    key = sess + '_' + d_str
+    
+    # Group by the unique session key
+    session_groups = df.groupby(key)
+    
+    # Calculate the expanding high and low for each session
+    hi = session_groups['high'].expanding().max()
+    lo = session_groups['low'].expanding().min()
+    
+    # The result has a multi-index, so we need to remove the group's index
+    hi = hi.droplevel(0)
+    lo = lo.droplevel(0)
+    
+    # Calculate price vs. session range using the point-in-time values
+    df['Price_vs_Sess'] = (df['close'] - lo) / (hi - lo + 1e-6)
+    df['session'] = sess
+    
     return df
 
 def time_session_features(df):
