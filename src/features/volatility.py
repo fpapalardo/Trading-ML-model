@@ -35,14 +35,18 @@ def rolling_stats(df, price_col='close', window1=14, window2=30):
     return df
 
 def daily_vwap(df, high='high', low='low', close='close', volume='volume', new_col='VWAP_D'):
-    """Append daily VWAP."""
+    """Append daily VWAP without lookahead bias."""
     temp = df.copy()
     for col in [high, low, close, volume]:
         temp[col] = pd.to_numeric(temp[col], errors='coerce')
-    tpv = ((temp[high]+temp[low]+temp[close])/3)*temp[volume]
+        
+    tpv = ((temp[high] + temp[low] + temp[close]) / 3) * temp[volume]
+    
+    # .cumsum() is an expanding calculation, making it point-in-time safe
     cum_tpv = tpv.groupby(temp.index.date).cumsum()
     cum_vol = temp[volume].groupby(temp.index.date).cumsum()
-    df[new_col] = (cum_tpv/cum_vol).replace([np.inf, -np.inf], np.nan)
+    
+    df[new_col] = (cum_tpv / cum_vol).replace([np.inf, -np.inf], np.nan)
     return df
 
 def price_vs_bb(df, price='close', bb_up='BBU_20_2.0', bb_lo='BBL_20_2.0'):

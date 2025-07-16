@@ -100,23 +100,43 @@ def classification_insights(
 
 def compute_max_consecutive_loss(df):
     """
-    Calculates the worst cumulative loss (drawdown) from any starting point.
+    Returns:
+      max_loss:  float, worst drawdown from any run of trades,
+                 where run_sum resets to 0 on any net gain.
+      start:     Timestamp of the first losing trade in that run
+      end:       Timestamp of the last losing trade in that run
     """
-    pnl_series = df['pnl'].values
+    pnl = df['pnl'].values
+    times = df['entry_time'].values
+
+    run_sum = 0.0
     max_loss = 0.0
-    start_idx = 0
-    end_idx = 0
+    run_start_idx = 0
 
-    for i in range(len(pnl_series)):
-        cumulative = 0.0
-        for j in range(i, len(pnl_series)):
-            cumulative += pnl_series[j]
-            if cumulative < max_loss:
-                max_loss = cumulative
-                start_idx = i
-                end_idx = j
+    best_start_idx = 0
+    best_end_idx   = 0
 
-    return max_loss, df['entry_time'].iloc[start_idx], df['entry_time'].iloc[end_idx]
+    for i, x in enumerate(pnl):
+        run_sum += x
+
+        # If we've bounced back to >= 0, start a fresh run at next trade
+        if run_sum >= 0:
+            run_sum = 0.0
+            run_start_idx = i + 1
+            continue
+
+        # Otherwise, we're in a drawdown; record its depth
+        if -run_sum > max_loss:
+            max_loss      = -run_sum
+            best_start_idx = run_start_idx
+            best_end_idx   = i
+
+    return (
+        max_loss,
+        pd.to_datetime(times[best_start_idx]),
+        pd.to_datetime(times[best_end_idx])
+    )
+
 
 def visualize_results(results):
     best_result = None
@@ -136,7 +156,7 @@ def visualize_results(results):
             r['win_rate'] > 0.001 and
             r['profit_factor'] > 0.01 and
             r['expectancy'] > 0.01 and
-            r['pnl'] > 100
+            r['pnl'] > 1
         ):
             if best_result is None or r['sharpe'] > best_result['sharpe']:
                 best_result = r.copy()

@@ -44,6 +44,7 @@ def create_study(
     return optuna.create_study(
         study_name=study_name,
         direction=direction,
+        #directions=["maximize", "maximize"],
         sampler=optuna.samplers.TPESampler(seed=seed),
         pruner=optuna.pruners.MedianPruner(n_startup_trials=pruner_startup),
         storage=storage,

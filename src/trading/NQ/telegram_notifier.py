@@ -287,6 +287,21 @@ class TelegramNotifier:
         )
         
         self.send_message(message)
+
+    def send_position_update(self, contract: str, qty: float, avg_price: float, pnl: float):
+        """
+        Send current position status: average price, quantity, unrealized PnL.
+        """
+        emoji = self.emoji['chart']
+        message = (
+            f"<b>{emoji} POSITION UPDATE</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"{contract}\n"
+            f"Size: <b>{qty}</b> @ {avg_price:.2f}\n"
+            f"Unrealized PnL: <b>${pnl:.2f}</b>\n"
+            f"Time: {datetime.now(self.ny_tz):%H:%M:%S ET}"
+        )
+        self.send_message(message)
     
     def send_market_update(self, bid: float, ask: float, last: float):
         """Send current market quote."""

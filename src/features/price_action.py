@@ -78,24 +78,91 @@ def stop_hunt(df):
     return df
 
 def fvg(df):
-    h1, l1 = df['high'].shift(1), df['low'].shift(1)
-    h2, l2 = df['high'].shift(-1),df['low'].shift(-1)
-    bg = l2>h1; br = h2<l1
-    df['FVG_Exists'] = (bg|br).astype(int)
-    size = pd.Series(0., index=df.index)
-    size[bg]= (l2-h1)[bg]; size[br]=(l1-h2)[br]
-    df['FVG_Size']=size
-    pos = pd.Series(0, index=df.index)
-    pos[bg&(df['close']>l2)] = 1
-    pos[br&(df['close']<h2)] = -1
-    df['FVG_Pos']=pos
+    """
+    Calculates Fair Value Gaps (FVG) without lookahead bias.
+
+    A Fair Value Gap is a three-candle pattern. This function identifies the
+    pattern and makes the signal available for the candle immediately following
+    the completion of the pattern, ensuring no future data is used.
+
+    The pattern is defined by three consecutive candles:
+    - Candle 1 (T-2): Two periods ago
+    - Candle 2 (T-1): One period ago
+    - Candle 3 (T): The current candle being evaluated
+
+    A Bullish FVG is formed if the low of Candle 3 is higher than the high of Candle 1.
+    A Bearish FVG is formed if the high of Candle 3 is lower than the low of Candle 1.
+    """
+    df = df.copy()
+
+    # --- Get Past Data Using Shifts ---
+    # To evaluate the pattern at the current candle (T), we need data from T-2.
+    high_t2 = df['high'].shift(2)
+    low_t2 = df['low'].shift(2)
+
+    # --- Identify the Gaps ---
+    # The pattern is confirmed at the close of the current candle (T).
+    # A bullish FVG exists if the current low is above the high from 2 periods ago.
+    bullish_fvg = df['low'] > high_t2
+
+    # A bearish FVG exists if the current high is below the low from 2 periods ago.
+    bearish_fvg = df['high'] < low_t2
+
+    # --- Calculate Features ---
+    # The signal is known at the close of candle T, so it is valid for making
+    # a decision for the *next* candle, T+1. We shift all final results by 1.
+
+    # 1. FVG Existence: 1 for bullish, -1 for bearish, 0 for none.
+    fvg_exists = pd.Series(0, index=df.index)
+    fvg_exists.loc[bullish_fvg] = 1
+    fvg_exists.loc[bearish_fvg] = -1
+    df['FVG_Exists'] = fvg_exists.shift(1).fillna(0).astype(int)
+
+    # 2. FVG Size: The magnitude of the gap in price points.
+    fvg_size = pd.Series(0.0, index=df.index)
+    fvg_size.loc[bullish_fvg] = df['low'][bullish_fvg] - high_t2[bullish_fvg]
+    fvg_size.loc[bearish_fvg] = low_t2[bearish_fvg] - df['high'][bearish_fvg]
+    df['FVG_Size'] = fvg_size.shift(1).fillna(0)
+
+    # 3. FVG Position: Where the close of the 3rd candle is relative to the gap it created.
+    #    - For a bullish gap, a value of 1 means the close was at the top of the gap.
+    #    - For a bearish gap, a value of 1 means the close was at the bottom of the gap.
+    #    - A value of 0.5 means the close was in the middle of the gap.
+    fvg_pos = pd.Series(np.nan, index=df.index)
+    
+    # Calculate normalized position for bullish gaps
+    bull_gap_size = df['low'][bullish_fvg] - high_t2[bullish_fvg]
+    bull_filled = df['close'][bullish_fvg] - high_t2[bullish_fvg]
+    fvg_pos.loc[bullish_fvg] = (bull_filled / bull_gap_size).clip(0, 1) # Clip to handle closes outside the gap
+
+    # Calculate normalized position for bearish gaps
+    bear_gap_size = low_t2[bearish_fvg] - df['high'][bearish_fvg]
+    bear_filled = low_t2[bearish_fvg] - df['close'][bearish_fvg]
+    fvg_pos.loc[bearish_fvg] = (bear_filled / bear_gap_size).clip(0, 1) # Clip to handle closes outside the gap
+    
+    df['FVG_Pos'] = fvg_pos.shift(1).fillna(0)
+
     return df
 
-def day_high_low_open(df):
-    d = df.index.date
-    df['Open_Day']=df.groupby(d)['open'].transform('first')
-    df['High_Day']=df.groupby(d)['high'].transform('max')
-    df['Low_Day']=df.groupby(d)['low'].transform('min')
+def day_high_low_open(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates point-in-time daily high, low, and open prices
+    without lookahead bias.
+    """
+    df = df.copy()
+
+    # Group by the calendar date of the DatetimeIndex
+    daily_groups = df.groupby(df.index.date)
+
+    # High_Day: The max high seen *so far* today
+    df['High_Day'] = daily_groups['high'].expanding().max().droplevel(0)
+
+    # Low_Day: The min low seen *so far* today
+    df['Low_Day'] = daily_groups['low'].expanding().min().droplevel(0)
+
+    # Open_Day: The very first 'open' price of the day
+    df['Open_Day'] = daily_groups['open'].transform('first')
+
     return df
 
 def prev_high_low(df):
